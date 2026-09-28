@@ -40,6 +40,13 @@ describe('dictionaries', () => {
     expect(DICTIONARIES.en.priceFree).toBe('free');
   });
 
+  it('carries a genres label distinct from the cities label, for the genre group\'s aria-label', () => {
+    for (const lang of LANGS) {
+      expect(DICTIONARIES[lang].genres).toBeTruthy();
+      expect(DICTIONARIES[lang].genres).not.toBe(DICTIONARIES[lang].cities);
+    }
+  });
+
   it('carry the happening-now labels', () => {
     expect(DICTIONARIES.sk.happeningNow).toBe('Práve prebieha');
     expect(DICTIONARIES.cs.happeningNow).toBe('Právě probíhá');

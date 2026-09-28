@@ -1,7 +1,7 @@
 import { Prisma, type Event as EventRow } from '@prisma/client';
 import { FUZZY_WINDOW_MS } from '@/lib/config';
 import { prisma } from '@/lib/db';
-import { blankFills, computeEventPrice, pickFuzzyMatch } from '@/lib/dedupe';
+import { blankFills, computeEventPrice, pickFuzzyMatch, reconcileRescrape } from '@/lib/dedupe';
 import { deriveSortFields } from '@/lib/events/derive';
 import { normalizeRaw, type NormalizedEvent } from '@/lib/normalize';
 import type { RawEvent } from '@/lib/types';
@@ -61,7 +61,7 @@ async function ingestWithRetry(n: NormalizedEvent, sourceId: string, now: Date):
   }
 }
 
-async function ingestOne(tx: Tx, n: NormalizedEvent, sourceId: string, now: Date): Promise<Outcome> {
+export async function ingestOne(tx: Tx, n: NormalizedEvent, sourceId: string, now: Date): Promise<Outcome> {
   // 1. Known listing URL: a re-scrape.
   const known = await tx.eventSource.findUnique({ where: { url: n.url }, include: { event: true } });
   if (known) {
@@ -69,7 +69,30 @@ async function ingestOne(tx: Tx, n: NormalizedEvent, sourceId: string, now: Date
       where: { id: known.id },
       data: { priceFrom: n.price, currency: n.priceCurrency, lastSeenAt: now },
     });
-    await fillAndRefresh(tx, known.event, n);
+
+    // A single-source event has nothing else vouching for its data, so the fresh scrape fully
+    // replaces it. A multi-source event only accepts a startsAt drift past the fuzzy window.
+    const otherSources = await tx.eventSource.count({ where: { eventId: known.eventId, id: { not: known.id } } });
+    const fields = reconcileRescrape(known.event, n, otherSources > 0);
+
+    if (fields.startsAt && fields.startsAt.getTime() !== known.event.startsAt.getTime()) {
+      console.log(
+        `[ingest] reschedule: "${known.event.title}" ${known.event.startsAt.toISOString()} -> ${fields.startsAt.toISOString()}`,
+      );
+    }
+
+    if (fields.fingerprint && fields.fingerprint !== known.event.fingerprint) {
+      // The rewritten fingerprint may now collide with an event we already track separately.
+      const collision = await tx.event.findUnique({ where: { fingerprint: fields.fingerprint } });
+      if (collision && collision.id !== known.eventId) {
+        await tx.eventSource.update({ where: { id: known.id }, data: { eventId: collision.id } });
+        await tx.event.delete({ where: { id: known.eventId } });
+        await fillAndRefresh(tx, collision, n);
+        return 'merged';
+      }
+    }
+
+    await fillAndRefresh(tx, known.event, n, fields);
     return 'updated';
   }
 
@@ -120,8 +143,18 @@ async function findFuzzy(tx: Tx, n: NormalizedEvent): Promise<EventRow | null> {
   return pickFuzzyMatch(n.title, candidates);
 }
 
-/** Fill blank fields from the incoming listing and recompute price + sort columns from all sources. */
-async function fillAndRefresh(tx: Tx, event: EventRow, n: NormalizedEvent): Promise<void> {
+/**
+ * Fill blank fields from the incoming listing and recompute price + sort columns from all sources.
+ * `overrides` (from `reconcileRescrape`) are applied as absolute values ahead of the blank-fill pass,
+ * which then becomes a no-op for any field an override already set.
+ */
+async function fillAndRefresh(
+  tx: Tx,
+  event: EventRow,
+  n: NormalizedEvent,
+  overrides: Partial<Pick<EventRow, 'startsAt' | 'title' | 'venue' | 'endsAt' | 'fingerprint'>> = {},
+): Promise<void> {
+  const merged = { ...event, ...overrides };
   const sources = await tx.eventSource.findMany({
     where: { eventId: event.id },
     select: { priceFrom: true, currency: true },
@@ -133,9 +166,10 @@ async function fillAndRefresh(tx: Tx, event: EventRow, n: NormalizedEvent): Prom
   await tx.event.update({
     where: { id: event.id },
     data: {
-      ...blankFills(event, n),
+      ...overrides,
+      ...blankFills(merged, n),
       priceFrom,
-      ...deriveSortFields({ startsAt: event.startsAt, priceFrom }),
+      ...deriveSortFields({ startsAt: merged.startsAt, priceFrom }),
     },
   });
 }

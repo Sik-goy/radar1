@@ -1,5 +1,5 @@
 import type { EventCardData } from '@/lib/events/card';
-import { formatMoney, formatWhen } from '@/lib/format';
+import { formatPriceLabel, formatWhen } from '@/lib/format';
 import { fill, LOCALES, type Dictionary, type Lang } from '@/lib/i18n/dictionaries';
 import type { Genre } from '@/lib/types';
 
@@ -16,12 +16,7 @@ const GENRE_GRADIENT: Record<Genre, string> = {
 
 export function EventCard({ event, lang, dict }: { event: EventCardData; lang: Lang; dict: Dictionary }) {
   const locale = LOCALES[lang];
-  const price =
-    event.priceFrom === null
-      ? dict.priceTba
-      : event.priceFrom === 0
-        ? dict.priceFree
-        : fill(dict.priceFrom, { price: formatMoney(event.priceFrom, event.currency, locale) });
+  const price = formatPriceLabel(event.priceFrom, event.currency, locale, dict);
 
   return (
     <article className="flex h-full flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm">
@@ -53,9 +48,7 @@ export function EventCard({ event, lang, dict }: { event: EventCardData; lang: L
               className="rounded-full bg-zinc-900 px-3 py-1 text-xs font-medium text-white hover:bg-zinc-700"
             >
               {fill(dict.buyOn, { source: source.sourceName })}
-              {source.priceFrom !== null && source.priceFrom > 0
-                ? ` · ${formatMoney(source.priceFrom, source.currency, locale)}`
-                : ''}
+              {source.priceFrom !== null ? ` · ${formatPriceLabel(source.priceFrom, source.currency, locale, dict)}` : ''}
             </a>
           ))}
         </div>

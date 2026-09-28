@@ -23,10 +23,11 @@ export function parseFilters(params: RawParams): EventFilters {
   const whenRaw = first(params.when);
   const when = (WHEN_VALUES as readonly string[]).includes(whenRaw ?? '') ? (whenRaw as When) : undefined;
 
-  const priceRaw = first(params.maxPrice)?.trim();
-  const priceNum = priceRaw ? Number(priceRaw) : Number.NaN;
+  const priceRaw = first(params.maxPrice);
+  // Plain decimal only: no hex (0x10), exponential (1e2) or leading +/- notation Number() would accept.
+  const priceNum = priceRaw && /^\d+(\.\d+)?$/.test(priceRaw) ? Number(priceRaw) : Number.NaN;
   // The CZK bound is maxPrice * CZK_PER_EUR, which must stay finite too or Prisma rejects the query.
-  const maxPrice = Number.isFinite(priceNum * CZK_PER_EUR) && priceNum >= 0 ? priceNum : undefined;
+  const maxPrice = Number.isFinite(priceNum * CZK_PER_EUR) ? priceNum : undefined;
 
   const pageNum = Math.floor(Number(first(params.page)));
   const page = Number.isFinite(pageNum) && pageNum >= 1 ? Math.min(pageNum, MAX_PAGE) : 1;
@@ -94,6 +95,22 @@ export function buildVisibleWhere(now: Date): Prisma.EventWhereInput {
       { endsAt: null, startsAt: { gte: new Date(now.getTime() - SINGLE_EVENT_DURATION_MS) } },
     ],
   };
+}
+
+/** The inverse of a URLSearchParams string: repeated keys become arrays, single ones stay strings. */
+export function rawParamsFromSearch(search: string): RawParams {
+  const query = new URLSearchParams(search);
+  const raw: RawParams = {};
+  for (const key of new Set(query.keys())) {
+    const values = query.getAll(key);
+    raw[key] = values.length > 1 ? values : values[0];
+  }
+  return raw;
+}
+
+/** MAX_PAGE clamps `page` itself, so "load more" must stop offering a next page once it's reached. */
+export function hasNextPage(hasMore: boolean, page: number): boolean {
+  return hasMore && page < MAX_PAGE;
 }
 
 export function withPage(params: RawParams, page: number): string {

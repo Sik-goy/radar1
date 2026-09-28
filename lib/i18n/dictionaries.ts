@@ -12,6 +12,7 @@ export interface Dictionary {
   tagline: string;
   language: string;
   cities: string;
+  genres: string;
   allCities: string;
   citiesSelected: string;
   date: string;
@@ -35,6 +36,7 @@ const sk: Dictionary = {
   tagline: 'Eventy zo Slovenska a Česka na jednom mieste',
   language: 'Jazyk',
   cities: 'Mestá',
+  genres: 'Žánre',
   allCities: 'Všetky mestá',
   citiesSelected: 'Vybrané: {count}',
   date: 'Dátum',
@@ -66,6 +68,7 @@ const cs: Dictionary = {
   tagline: 'Události z Česka a Slovenska na jednom místě',
   language: 'Jazyk',
   cities: 'Města',
+  genres: 'Žánry',
   allCities: 'Všechna města',
   citiesSelected: 'Vybráno: {count}',
   date: 'Datum',
@@ -97,6 +100,7 @@ const en: Dictionary = {
   tagline: 'Events from Slovakia and Czechia in one place',
   language: 'Language',
   cities: 'Cities',
+  genres: 'Genres',
   allCities: 'All cities',
   citiesSelected: '{count} selected',
   date: 'Date',

@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { buildHappeningNowWhere, buildVisibleWhere, buildWhere, parseFilters, withPage } from '@/lib/events/filters';
+import {
+  buildHappeningNowWhere,
+  buildVisibleWhere,
+  buildWhere,
+  hasNextPage,
+  parseFilters,
+  rawParamsFromSearch,
+  withPage,
+} from '@/lib/events/filters';
+import { MAX_PAGE } from '@/lib/config';
 
 describe('parseFilters', () => {
   it('returns safe defaults for empty params', () => {
@@ -34,8 +43,17 @@ describe('parseFilters', () => {
   });
 
   it('ignores a maxPrice that overflows once converted to CZK', () => {
-    expect(parseFilters({ maxPrice: '1e308' }).maxPrice).toBeUndefined();
-    expect(parseFilters({ maxPrice: '1e300' }).maxPrice).toBe(1e300);
+    const huge = `1${'0'.repeat(307)}`; // finite as a number, but * CZK_PER_EUR overflows to Infinity
+    expect(parseFilters({ maxPrice: huge }).maxPrice).toBeUndefined();
+  });
+
+  it('accepts only plain decimal numbers for maxPrice, not hex or exponential notation', () => {
+    expect(parseFilters({ maxPrice: '30' }).maxPrice).toBe(30);
+    expect(parseFilters({ maxPrice: '12.5' }).maxPrice).toBe(12.5);
+    expect(parseFilters({ maxPrice: '0x10' }).maxPrice).toBeUndefined();
+    expect(parseFilters({ maxPrice: '1e2' }).maxPrice).toBeUndefined();
+    expect(parseFilters({ maxPrice: '30 ' }).maxPrice).toBeUndefined();
+    expect(parseFilters({ maxPrice: '+30' }).maxPrice).toBeUndefined();
   });
 
   it('clamps page to 1..50', () => {
@@ -153,5 +171,27 @@ describe('withPage', () => {
 
   it('works without existing params', () => {
     expect(withPage({}, 2)).toBe('?page=2');
+  });
+});
+
+describe('rawParamsFromSearch', () => {
+  it('turns a query string into RawParams, single values as strings and repeats as arrays', () => {
+    expect(rawParamsFromSearch('city=Praha&city=Brno&genre=concert')).toEqual({
+      city: ['Praha', 'Brno'],
+      genre: 'concert',
+    });
+  });
+
+  it('is empty for an empty query string', () => {
+    expect(rawParamsFromSearch('')).toEqual({});
+  });
+});
+
+describe('hasNextPage', () => {
+  it('is true only when the query says there is more and the page cap has not been hit', () => {
+    expect(hasNextPage(true, 1)).toBe(true);
+    expect(hasNextPage(false, 1)).toBe(false);
+    expect(hasNextPage(true, MAX_PAGE)).toBe(false);
+    expect(hasNextPage(true, MAX_PAGE - 1)).toBe(true);
   });
 });

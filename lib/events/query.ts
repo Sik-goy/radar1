@@ -33,7 +33,9 @@ export async function queryHappeningNow(filters: EventFilters, now: Date = new D
   const [multiDay, singleTime] = await Promise.all([
     prisma.event.findMany({
       where: where.multiDay,
-      orderBy: { endsAt: 'asc' },
+      // Ties on endsAt (e.g. several exhibitions all ending at day's end) break on startsAt, same as
+      // mergeHappeningNow, so the DB's LIMIT does not arbitrarily drop the earlier-starting one.
+      orderBy: [{ endsAt: 'asc' }, { startsAt: 'asc' }],
       take: HAPPENING_NOW_LIMIT,
       include: withSources,
     }),

@@ -138,12 +138,15 @@ Notes:
 
 Processed sequentially (later items in a batch can match earlier ones). For each `RawEvent`, after normalization:
 
-1. **URL match**: `EventSource` by canonical `url`. Hit means a re-scrape of a known listing: update `priceFrom`, `currency`, `lastSeenAt`; fill blank Event fields (`imageUrl`, `endsAt`); recompute `Event.priceFrom`. Done.
+1. **URL match**: `EventSource` by canonical `url`. Hit means a re-scrape of a known listing: update `priceFrom`, `currency`, `lastSeenAt`. Then reconcile the Event itself against the fresh scrape:
+   - **Single-source event** (no other `EventSource` rows): nothing else vouches for its data, so the scrape fully replaces `title`, `venue`, `startsAt`, `endsAt` and the recomputed `fingerprint`. If the new fingerprint collides with a different existing `Event`, merge into it instead — move this `EventSource` there, delete the now-empty original `Event`, recompute price.
+   - **Multi-source event**: other sources still back the current `startsAt`, so only a drift past the fuzzy window (> 3h) is accepted as a genuine reschedule (logged); anything smaller is ignored. `title`, `venue` and `fingerprint` are never touched by a re-scrape while another source backs them.
+   - Either way, blank Event fields (`imageUrl`, `endsAt`) are filled from the scrape where still unset, and `Event.priceFrom` is recomputed. Done.
 2. **Fingerprint match**: `Event` by `fingerprint`. Hit: create `EventSource` on that event, merge, recompute price.
 3. **Fuzzy match**: query events with same `city` and `startsAt` within +/-3h, then `pickFuzzyMatch`. Hit: create `EventSource` on that event, merge, recompute price.
 4. **Insert**: create `Event` + `EventSource`.
 
-Merge policy: existing Event fields win; only blanks (`imageUrl`, `endsAt`) are filled. A fuzzy-merged event keeps its original fingerprint.
+Merge policy: existing Event fields win; only blanks (`imageUrl`, `endsAt`) are filled, and never with an `endsAt` that would land before the existing `startsAt`. A fuzzy-merged event keeps its original fingerprint.
 
 Race: on unique violation (P2002) for `fingerprint` or `url`, retry the flow once as a merge.
 
@@ -209,3 +212,10 @@ Ingest DB flow is verified by running the seed against the Neon dev branch and i
 - "Genre chi" = genre chips.
 - "Levenshtein < 0.2" = normalized distance (edit distance / longer title length).
 - Digest matching uses favorites' city and genre sets, not per-event follow.
+
+## Open questions (dedupe tuning, deferred to the scraper plan)
+
+Real scraper data will show whether these matter; both are left as-is for plan 1, pinned by tests that document the current behavior rather than changing it.
+
+- **Same title, venue and day collapses to one event.** The fingerprint is `title|venue|Prague-date`, so two distinct shows at the same venue on the same day (e.g. an 18:00 and a 21:00 stand-up set) merge into a single `Event`, and the later time is lost from the card. A fix needs a real design decision (time in the fingerprint? a distinct-showtimes model on one Event?), not a one-line change.
+- **Fuzzy match tolerates a bare number suffix.** `pickFuzzyMatch`'s number-conflict guard only fires when *both* titles contain a number sequence and they differ (`"Jazz Night 1"` vs `"Jazz Night 2"` correctly does not merge). `"Jazz Night"` vs `"Jazz Night 2"` still merges, since only one side has a number. Rare in practice (most recurring-event scrapers number every instance), but worth a second look once real listings are in.

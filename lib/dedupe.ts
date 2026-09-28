@@ -1,4 +1,4 @@
-import { FUZZY_THRESHOLD } from '@/lib/config';
+import { FUZZY_THRESHOLD, FUZZY_WINDOW_MS } from '@/lib/config';
 import { normalizeText } from '@/lib/normalize/text';
 import type { Currency } from '@/lib/types';
 
@@ -67,11 +67,37 @@ export function computeEventPrice(
 }
 
 export function blankFills(
-  existing: { imageUrl: string | null; endsAt: Date | null },
+  existing: { startsAt: Date; imageUrl: string | null; endsAt: Date | null },
   incoming: { imageUrl: string | null; endsAt: Date | null },
 ): { imageUrl?: string; endsAt?: Date } {
   const fills: { imageUrl?: string; endsAt?: Date } = {};
   if (!existing.imageUrl && incoming.imageUrl) fills.imageUrl = incoming.imageUrl;
-  if (!existing.endsAt && incoming.endsAt) fills.endsAt = incoming.endsAt;
+  // A fuzzy-matched source can carry its own startsAt; never let its endsAt predate ours.
+  if (!existing.endsAt && incoming.endsAt && incoming.endsAt > existing.startsAt) fills.endsAt = incoming.endsAt;
   return fills;
+}
+
+interface RescrapeFields {
+  startsAt: Date;
+  title: string;
+  venue: string;
+  endsAt: Date | null;
+  fingerprint: string;
+}
+
+/**
+ * A re-scrape of a known EventSource. A single-source event has nothing else vouching for its data,
+ * so the fresh scrape fully replaces it (fingerprint included, since title/venue/date all moved
+ * together). A multi-source event keeps its other sources' agreement: only a startsAt drift past the
+ * fuzzy-match window counts as a genuine reschedule; title, venue and fingerprint never change from a
+ * re-scrape while another source still backs them.
+ */
+export function reconcileRescrape(
+  existing: RescrapeFields,
+  incoming: RescrapeFields,
+  hasOtherSources: boolean,
+): Partial<RescrapeFields> {
+  if (!hasOtherSources) return { ...incoming };
+  const drift = Math.abs(incoming.startsAt.getTime() - existing.startsAt.getTime());
+  return drift > FUZZY_WINDOW_MS ? { startsAt: incoming.startsAt } : {};
 }

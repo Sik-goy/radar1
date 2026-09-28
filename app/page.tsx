@@ -3,7 +3,7 @@ import { EventCard } from '@/components/EventCard';
 import { FilterBar } from '@/components/FilterBar';
 import { HappeningNow } from '@/components/HappeningNow';
 import { getCityOptions, queryEvents, queryHappeningNow } from '@/lib/events/query';
-import { parseFilters, withPage, type RawParams } from '@/lib/events/filters';
+import { hasNextPage, parseFilters, withPage, type RawParams } from '@/lib/events/filters';
 import { DICTIONARIES, LOCALES } from '@/lib/i18n/dictionaries';
 import { getLang } from '@/lib/i18n/server';
 
@@ -20,12 +20,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
   return (
     <>
-      <FilterBar
-        cities={cityOptions}
-        selected={{ cities: filters.cities, genres: filters.genres, when: filters.when, maxPrice: filters.maxPrice }}
-        dict={dict}
-        locale={LOCALES[lang]}
-      />
+      <FilterBar cities={cityOptions} dict={dict} locale={LOCALES[lang]} />
       <div className="mx-auto max-w-7xl px-4 py-6">
         <HappeningNow events={happeningNow} lang={lang} dict={dict} />
         {events.length === 0 ? (
@@ -39,7 +34,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
             ))}
           </ul>
         )}
-        {hasMore && (
+        {hasNextPage(hasMore, filters.page) && (
           <div className="mt-8 text-center">
             <Link
               href={withPage(params, filters.page + 1)}
