@@ -4,7 +4,7 @@
 
 **Goal:** Ship a working Radar feed: Prisma schema on Neon, pure normalize/dedupe/date modules with unit tests, an ingest pipeline, a mock seed, and a filterable, translated event grid.
 
-**Architecture:** Pure, DB-free modules (`lib/normalize`, `lib/dedupe`, `lib/dates`, `lib/events/filters`) hold all decision logic and carry the unit tests. `lib/ingest.ts` is the only writer: URL match, then fingerprint, then fuzzy, then insert. The home page is a server component that reads filters from URL search params and queries Prisma directly. The filter bar is a client component that only rewrites the URL.
+**Architecture:** Pure, DB-free modules (`lib/normalize`, `lib/dedupe`, `lib/dates`, `lib/events/filters`) hold all decision logic and carry the unit tests. `lib/ingest.ts` is the only writer: URL match, then fingerprint, then fuzzy, then insert. The home page is a server component that reads filters from URL search params and queries Prisma directly for two lists: the main grid (events that have not started yet) and a "Happening now" row (started, not yet ended). The filter bar is a client component that only rewrites the URL.
 
 **Tech Stack:** Next.js 15 (App Router), React 19, TypeScript (strict), Tailwind CSS v4, Prisma 6 on Neon Postgres, date-fns v4 + `@date-fns/tz`, Vitest, tsx.
 
@@ -25,10 +25,12 @@
 - Fuzzy match: same city AND `|startsAt diff| <= 3h` AND normalized title distance `< 0.2` (edit distance / longer normalized title). Venue is not compared.
 - Ingest order: `EventSource.url` (canonicalized) first, then fingerprint, then fuzzy, then insert.
 - `Event.priceFrom` = min of `EventSource.priceFrom` where `EventSource.currency == Event.currency`. `0` = free, `null` = unknown. Currencies are never compared.
-- Effective end = `coalesce(endsAt, startsAt + 2h)`. The feed never shows events whose effective end is before now.
+- Effective end = `coalesce(endsAt, startsAt + 2h)`. Events whose effective end is before now appear nowhere.
+- Main grid = events with `startsAt >= rangeStart` (and `startsAt <= rangeEnd` when the range has an end), sorted by `startsAt`. Events that already started never appear in the grid, so ongoing events never pin to its top.
+- "Happening now" row (labels "Práve prebieha" / "Právě probíhá" / "Happening now") = events with `startsAt < now` and effective end `>= now`, max 12 (`HAPPENING_NOW_LIMIT`), sorted by effective end ascending. Same city/genre/maxPrice filters apply. Hidden when the range start is in the future (a weekend that has not begun); shown for every other range. Horizontal scroll, hidden when empty.
 - Date ranges: `today` = now to end of Prague day; `week` = now + 7d; `month` = now + 30d; `weekend` = Fri 18:00 to Sun end of day (start = now if already inside; next weekend if past).
 - `maxPrice` is in EUR. CZK events compare against `maxPrice * CZK_PER_EUR` (constant `25`). Events with `priceFrom = null` always pass the filter.
-- Sort: `startDay` asc, `priceKnown` desc, `startsAt` asc (denormalized columns `startDay`, `priceKnown`).
+- Main grid sort: `startDay` asc, `priceKnown` desc, `startsAt` asc (denormalized columns `startDay`, `priceKnown`), so priced events come first within a day.
 - Page size 24. "Load more" re-renders the first `page * 24` events.
 - Price labels: null = "cena neuvedená" (sk) / "cena neuvedena" (cs) / "price TBA" (en); 0 = "zadarmo" / "zdarma" / "free".
 - Language via `lang` cookie (default from `Accept-Language`, fallback `sk`). Locale codes `sk`, `cs`, `en`; the `cs` toggle is labelled "CZ".
@@ -44,6 +46,7 @@ Inputs the spec implies but does not spell out. Each has a pinning test in the t
 3. Scraper garbage must skip the one item, not crash the batch: title that normalizes to empty (emoji-only), invalid `startsAt`, unknown city with no country, unknown source slug, a DB error on one item. (Tasks 5 and 8)
 4. Malformed URL params: single vs repeated `city`, unknown `genre` values, bogus `when`, `page=0`/`-3`/`abc`/huge. Must yield safe defaults. (Task 7)
 5. Prices from scrapers: negative, `NaN`, missing become unknown (null); `0` stays free; a source in the other currency never affects `Event.priceFrom`. (Tasks 5 and 6)
+6. The boundary between the grid and the Happening now row: an event starting exactly at `now` is in the grid (`startsAt >= now`), not the row (`startsAt < now`); a single-time event exactly 2h old still counts as happening; the row is hidden under a future-weekend filter but shown once now is inside the weekend; row ordering ties (same effective end) break by earlier `startsAt`. (Task 7)
 
 ---
 
@@ -54,7 +57,7 @@ package.json, tsconfig.json, next.config.ts, postcss.config.mjs, vitest.config.t
 .env.example, README.md
 prisma/schema.prisma, prisma/seed.ts, prisma/migrations/...
 app/layout.tsx, app/globals.css, app/page.tsx
-components/Header.tsx, components/FilterBar.tsx, components/EventCard.tsx
+components/Header.tsx, components/FilterBar.tsx, components/EventCard.tsx, components/HappeningNow.tsx
 lib/types.ts            shared unions + RawEvent
 lib/config.ts           constants (page size, thresholds, CZK_PER_EUR)
 lib/db.ts               Prisma singleton
@@ -63,9 +66,10 @@ lib/format.ts           Intl date/money formatting
 lib/normalize/          text.ts url.ts fingerprint.ts city.ts genre.ts index.ts (normalizeRaw)
 lib/dedupe.ts           levenshtein, titleDistance, pickFuzzyMatch, computeEventPrice, blankFills
 lib/events/derive.ts    deriveSortFields
-lib/events/filters.ts   parseFilters, buildWhere, withPage (pure)
+lib/events/filters.ts   parseFilters, buildWhere, buildHappeningNowWhere, buildVisibleWhere, withPage (pure)
+lib/events/happening.ts effectiveEnd, mergeHappeningNow (pure)
 lib/events/card.ts      toEventCard (pure row -> view mapper)
-lib/events/query.ts     queryEvents, getCityOptions (DB)
+lib/events/query.ts     queryEvents, queryHappeningNow, getCityOptions (DB)
 lib/ingest.ts           upsertRawEvents (DB)
 lib/mock-events.ts      buildMockEvents(now)
 lib/i18n/               dictionaries.ts pick.ts server.ts actions.ts
@@ -441,7 +445,7 @@ git commit -m "feat: add Prisma schema, initial migration, db client"
 
 **Interfaces:**
 - Produces:
-  - `lib/config.ts`: `CZK_PER_EUR = 25`, `PAGE_SIZE = 24`, `MAX_PAGE = 50`, `SINGLE_EVENT_DURATION_MS`, `FUZZY_WINDOW_MS`, `FUZZY_THRESHOLD = 0.2`
+  - `lib/config.ts`: `CZK_PER_EUR = 25`, `PAGE_SIZE = 24`, `MAX_PAGE = 50`, `HAPPENING_NOW_LIMIT = 12`, `SINGLE_EVENT_DURATION_MS`, `FUZZY_WINDOW_MS`, `FUZZY_THRESHOLD = 0.2`
   - `lib/dates.ts`: `TZ`, `WHEN_VALUES`, `type When`, `interface DateRange { start: Date; end: Date | null }`, `pragueDateString(d: Date): string`, `pragueDay(d: Date): Date`, `isMultiDay(startsAt: Date, endsAt: Date | null | undefined): boolean`, `resolveRange(when: When | undefined, now: Date): DateRange`
   - `lib/events/derive.ts`: `deriveSortFields(input: { startsAt: Date; priceFrom: number | null }): { startDay: Date; priceKnown: boolean }`
 
@@ -453,6 +457,7 @@ All date maths run on `TZDate` in Europe/Prague and never depend on the machine 
 export const CZK_PER_EUR = 25;
 export const PAGE_SIZE = 24;
 export const MAX_PAGE = 50;
+export const HAPPENING_NOW_LIMIT = 12;
 export const SINGLE_EVENT_DURATION_MS = 2 * 60 * 60 * 1000;
 export const FUZZY_WINDOW_MS = 3 * 60 * 60 * 1000;
 export const FUZZY_THRESHOLD = 0.2;
@@ -1515,32 +1520,39 @@ git commit -m "feat: add fuzzy dedupe helpers and event price computation"
 
 ---
 
-### Task 7: Event filters, where-builder, card mapper, DB query
+### Task 7: Event filters, where-builders, happening-now merge, card mapper, DB queries
 
 **Files:**
-- Create: `lib/events/filters.ts`, `lib/events/card.ts`, `lib/events/query.ts`
-- Test: `lib/events/filters.test.ts`, `lib/events/card.test.ts`
+- Create: `lib/events/filters.ts`, `lib/events/happening.ts`, `lib/events/card.ts`, `lib/events/query.ts`
+- Test: `lib/events/filters.test.ts`, `lib/events/happening.test.ts`, `lib/events/card.test.ts`
 
 **Interfaces:**
-- Consumes: `resolveRange`, `WHEN_VALUES`, `When`, `GENRES`, `Genre`, `CZK_PER_EUR`, `MAX_PAGE`, `PAGE_SIZE`, `SINGLE_EVENT_DURATION_MS`, `prisma`.
+- Consumes: `resolveRange`, `WHEN_VALUES`, `When`, `GENRES`, `Genre`, `CZK_PER_EUR`, `MAX_PAGE`, `PAGE_SIZE`, `HAPPENING_NOW_LIMIT`, `SINGLE_EVENT_DURATION_MS`, `prisma`.
 - Produces:
   - `type RawParams = Record<string, string | string[] | undefined>`
   - `interface EventFilters { cities: string[]; genres: Genre[]; when?: When; maxPrice?: number; page: number }`
   - `parseFilters(params: RawParams): EventFilters`
-  - `buildWhere(filters: EventFilters, now: Date): Prisma.EventWhereInput`
+  - `buildWhere(filters: EventFilters, now: Date): Prisma.EventWhereInput` (main grid: not started yet)
+  - `interface HappeningNowWhere { multiDay: Prisma.EventWhereInput; singleTime: Prisma.EventWhereInput }`
+  - `buildHappeningNowWhere(filters: EventFilters, now: Date): HappeningNowWhere | null` (null = row hidden)
+  - `buildVisibleWhere(now: Date): Prisma.EventWhereInput` (not ended yet; feeds the city dropdown)
   - `withPage(params: RawParams, page: number): string` (returns `?…`)
+  - `interface Timed { startsAt: Date; endsAt: Date | null }`, `effectiveEnd(e: Timed): Date`, `mergeHappeningNow<T extends Timed>(multiDay: T[], singleTime: T[], limit: number): T[]`
   - `toEventCard(row: EventRow): EventCardData`; types `EventRow`, `EventSourceView`, `EventCardData`
   - `queryEvents(filters: EventFilters, now?: Date): Promise<{ events: EventCardData[]; hasMore: boolean }>`
+  - `queryHappeningNow(filters: EventFilters, now?: Date): Promise<EventCardData[]>`
   - `getCityOptions(now?: Date): Promise<string[]>`
 
-`page` is cumulative: `queryEvents` returns the first `page * PAGE_SIZE` events, so "load more" re-renders a longer list.
+`page` is cumulative: `queryEvents` returns the first `page * PAGE_SIZE` events, so "load more" re-renders a longer list. `page` does not affect the Happening now row.
+
+Ongoing events are split from upcoming ones at `now`: the grid takes `startsAt >= now`, the row takes `startsAt < now` with effective end `>= now`. The row is fetched with two queries (multi-day events ordered by `endsAt`, single-time events ordered by `startsAt`, which orders them by effective end too) and merged in memory, because Prisma cannot order by `coalesce(endsAt, startsAt + 2h)`.
 
 - [ ] **Step 1: Write the failing tests**
 
 `lib/events/filters.test.ts`:
 ```ts
 import { describe, expect, it } from 'vitest';
-import { buildWhere, parseFilters, withPage } from '@/lib/events/filters';
+import { buildHappeningNowWhere, buildVisibleWhere, buildWhere, parseFilters, withPage } from '@/lib/events/filters';
 
 describe('parseFilters', () => {
   it('returns safe defaults for empty params', () => {
@@ -1584,28 +1596,32 @@ describe('parseFilters', () => {
   });
 });
 
-describe('buildWhere', () => {
-  const now = new Date('2026-09-30T10:00:00Z');
-  const twoHoursAgo = new Date('2026-09-30T08:00:00Z');
-  const filters = { cities: [], genres: [], page: 1 };
-  const overlap = (start: Date, startMinus2h: Date) => ({
-    OR: [{ endsAt: { gte: start } }, { endsAt: null, startsAt: { gte: startMinus2h } }],
-  });
+const now = new Date('2026-09-30T10:00:00Z'); // a Wednesday
+const twoHoursAgo = new Date('2026-09-30T08:00:00Z');
+const filters = { cities: [], genres: [], page: 1 };
+const priceClause = (max: number, maxCzk: number) => ({
+  OR: [
+    { priceFrom: null },
+    { currency: 'EUR', priceFrom: { lte: max } },
+    { currency: 'CZK', priceFrom: { lte: maxCzk } },
+  ],
+});
 
-  it('by default hides fully ended events, with a 2h effective end for single-time events', () => {
-    expect(buildWhere(filters, now)).toEqual({ AND: [overlap(now, twoHoursAgo)] });
+describe('buildWhere (main grid)', () => {
+  it('by default lists only events that have not started yet', () => {
+    expect(buildWhere(filters, now)).toEqual({ AND: [{ startsAt: { gte: now } }] });
   });
 
   it('adds the range end for today', () => {
     expect(buildWhere({ ...filters, when: 'today' }, now)).toEqual({
-      AND: [overlap(now, twoHoursAgo), { startsAt: { lte: new Date('2026-09-30T21:59:59.999Z') } }],
+      AND: [{ startsAt: { gte: now } }, { startsAt: { lte: new Date('2026-09-30T21:59:59.999Z') } }],
     });
   });
 
   it('uses the weekend window when when=weekend', () => {
     expect(buildWhere({ ...filters, when: 'weekend' }, now)).toEqual({
       AND: [
-        overlap(new Date('2026-10-02T16:00:00Z'), new Date('2026-10-02T14:00:00Z')),
+        { startsAt: { gte: new Date('2026-10-02T16:00:00Z') } },
         { startsAt: { lte: new Date('2026-10-04T21:59:59.999Z') } },
       ],
     });
@@ -1613,37 +1629,67 @@ describe('buildWhere', () => {
 
   it('adds city and genre membership', () => {
     expect(buildWhere({ ...filters, cities: ['Praha', 'Brno'], genres: ['concert'] }, now)).toEqual({
-      AND: [overlap(now, twoHoursAgo), { city: { in: ['Praha', 'Brno'] } }, { genre: { in: ['concert'] } }],
+      AND: [{ startsAt: { gte: now } }, { city: { in: ['Praha', 'Brno'] } }, { genre: { in: ['concert'] } }],
     });
   });
 
   it('maxPrice passes unknown prices and converts EUR to CZK', () => {
     expect(buildWhere({ ...filters, maxPrice: 30 }, now)).toEqual({
-      AND: [
-        overlap(now, twoHoursAgo),
-        {
-          OR: [
-            { priceFrom: null },
-            { currency: 'EUR', priceFrom: { lte: 30 } },
-            { currency: 'CZK', priceFrom: { lte: 750 } },
-          ],
-        },
-      ],
+      AND: [{ startsAt: { gte: now } }, priceClause(30, 750)],
     });
   });
 
   it('maxPrice=0 is a real filter (free + unknown), not "unset"', () => {
     expect(buildWhere({ ...filters, maxPrice: 0 }, now)).toEqual({
-      AND: [
-        overlap(now, twoHoursAgo),
-        {
-          OR: [
-            { priceFrom: null },
-            { currency: 'EUR', priceFrom: { lte: 0 } },
-            { currency: 'CZK', priceFrom: { lte: 0 } },
-          ],
-        },
-      ],
+      AND: [{ startsAt: { gte: now } }, priceClause(0, 0)],
+    });
+  });
+});
+
+describe('buildHappeningNowWhere', () => {
+  it('selects started, not-ended events: multi-day by endsAt, single-time within the 2h window', () => {
+    expect(buildHappeningNowWhere(filters, now)).toEqual({
+      multiDay: { AND: [{ startsAt: { lt: now } }, { endsAt: { gte: now } }] },
+      singleTime: { AND: [{ endsAt: null }, { startsAt: { lt: now } }, { startsAt: { gte: twoHoursAgo } }] },
+    });
+  });
+
+  it('partitions with the grid at now: grid is startsAt >= now, row is startsAt < now', () => {
+    const grid = buildWhere(filters, now);
+    const row = buildHappeningNowWhere(filters, now);
+    const startedBeforeNow = { AND: expect.arrayContaining([{ startsAt: { lt: now } }]) };
+    expect(grid).toEqual({ AND: [{ startsAt: { gte: now } }] });
+    expect(row?.multiDay).toEqual(startedBeforeNow);
+    expect(row?.singleTime).toEqual(startedBeforeNow);
+  });
+
+  it('applies city, genre and maxPrice filters to both queries', () => {
+    const common = [{ city: { in: ['Praha'] } }, { genre: { in: ['concert'] } }, priceClause(0, 0)];
+    const row = buildHappeningNowWhere({ ...filters, cities: ['Praha'], genres: ['concert'], maxPrice: 0 }, now);
+    expect(row?.multiDay).toEqual({ AND: [{ startsAt: { lt: now } }, { endsAt: { gte: now } }, ...common] });
+    expect(row?.singleTime).toEqual({
+      AND: [{ endsAt: null }, { startsAt: { lt: now } }, { startsAt: { gte: twoHoursAgo } }, ...common],
+    });
+  });
+
+  it.each(['today', 'week', 'month'] as const)('is available for when=%s and ignores the range end', (when) => {
+    expect(buildHappeningNowWhere({ ...filters, when }, now)).toEqual(buildHappeningNowWhere(filters, now));
+  });
+
+  it('is hidden when the weekend has not begun yet', () => {
+    expect(buildHappeningNowWhere({ ...filters, when: 'weekend' }, now)).toBeNull();
+  });
+
+  it('is shown once now is inside the weekend', () => {
+    const saturday = new Date('2026-10-03T10:00:00Z');
+    expect(buildHappeningNowWhere({ ...filters, when: 'weekend' }, saturday)).not.toBeNull();
+  });
+});
+
+describe('buildVisibleWhere', () => {
+  it('matches events whose effective end is not before now', () => {
+    expect(buildVisibleWhere(now)).toEqual({
+      OR: [{ endsAt: { gte: now } }, { endsAt: null, startsAt: { gte: twoHoursAgo } }],
     });
   });
 });
@@ -1705,10 +1751,63 @@ describe('toEventCard', () => {
 });
 ```
 
+`lib/events/happening.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest';
+import { effectiveEnd, mergeHappeningNow } from '@/lib/events/happening';
+
+const ev = (id: string, startsAt: string, endsAt: string | null) => ({
+  id,
+  startsAt: new Date(startsAt),
+  endsAt: endsAt ? new Date(endsAt) : null,
+});
+
+describe('effectiveEnd', () => {
+  it('is endsAt when present', () => {
+    expect(effectiveEnd(ev('a', '2026-09-20T10:00:00Z', '2026-10-30T18:00:00Z')).toISOString()).toBe('2026-10-30T18:00:00.000Z');
+  });
+
+  it('is startsAt + 2h for single-time events', () => {
+    expect(effectiveEnd(ev('b', '2026-09-30T09:00:00Z', null)).toISOString()).toBe('2026-09-30T11:00:00.000Z');
+  });
+});
+
+describe('mergeHappeningNow', () => {
+  const a = ev('a', '2026-09-20T10:00:00Z', '2026-10-30T18:00:00Z');
+  const b = ev('b', '2026-09-30T09:00:00Z', null); // ends 11:00
+  const c = ev('c', '2026-09-29T10:00:00Z', '2026-09-30T20:00:00Z');
+  const d = ev('d', '2026-09-30T08:30:00Z', null); // ends 10:30
+
+  it('sorts both lists together by effective end, soonest first', () => {
+    expect(mergeHappeningNow([a, c], [b, d], 12).map((e) => e.id)).toEqual(['d', 'b', 'c', 'a']);
+  });
+
+  it('keeps only the first `limit` after sorting', () => {
+    expect(mergeHappeningNow([a, c], [b, d], 2).map((e) => e.id)).toEqual(['d', 'b']);
+  });
+
+  it('breaks ties on the earlier startsAt', () => {
+    const earlier = ev('early', '2026-09-30T05:00:00Z', '2026-09-30T11:00:00Z');
+    expect(mergeHappeningNow([earlier], [b], 12).map((e) => e.id)).toEqual(['early', 'b']);
+  });
+
+  it('handles empty inputs', () => {
+    expect(mergeHappeningNow([], [], 12)).toEqual([]);
+    expect(mergeHappeningNow([a], [], 12).map((e) => e.id)).toEqual(['a']);
+  });
+
+  it('does not mutate its inputs', () => {
+    const multi = [a, c];
+    mergeHappeningNow(multi, [b, d], 12);
+    expect(multi.map((e) => e.id)).toEqual(['a', 'c']);
+  });
+});
+```
+
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run lib/events`
-Expected: FAIL for `filters` and `card` (modules not found); `derive.test.ts` still passes.
+Expected: FAIL for `filters`, `happening` and `card` (modules not found); `derive.test.ts` still passes.
 
 - [ ] **Step 3: Implement `lib/events/filters.ts`**
 
@@ -1748,22 +1847,13 @@ export function parseFilters(params: RawParams): EventFilters {
   return { cities, genres, when, maxPrice, page };
 }
 
-export function buildWhere(filters: EventFilters, now: Date): Prisma.EventWhereInput {
-  const { start, end } = resolveRange(filters.when, now);
-  const and: Prisma.EventWhereInput[] = [
-    {
-      // effective end = coalesce(endsAt, startsAt + 2h) must be >= range start
-      OR: [
-        { endsAt: { gte: start } },
-        { endsAt: null, startsAt: { gte: new Date(start.getTime() - SINGLE_EVENT_DURATION_MS) } },
-      ],
-    },
-  ];
-  if (end) and.push({ startsAt: { lte: end } });
-  if (filters.cities.length) and.push({ city: { in: filters.cities } });
-  if (filters.genres.length) and.push({ genre: { in: filters.genres } });
+/** City, genre and price filters, shared by the main grid and the Happening now row. */
+function commonClauses(filters: EventFilters): Prisma.EventWhereInput[] {
+  const clauses: Prisma.EventWhereInput[] = [];
+  if (filters.cities.length) clauses.push({ city: { in: filters.cities } });
+  if (filters.genres.length) clauses.push({ genre: { in: filters.genres } });
   if (filters.maxPrice !== undefined) {
-    and.push({
+    clauses.push({
       OR: [
         { priceFrom: null },
         { currency: 'EUR', priceFrom: { lte: filters.maxPrice } },
@@ -1771,7 +1861,52 @@ export function buildWhere(filters: EventFilters, now: Date): Prisma.EventWhereI
       ],
     });
   }
+  return clauses;
+}
+
+/** Main grid: events that have not started yet, inside the selected range. */
+export function buildWhere(filters: EventFilters, now: Date): Prisma.EventWhereInput {
+  const { start, end } = resolveRange(filters.when, now);
+  const and: Prisma.EventWhereInput[] = [{ startsAt: { gte: start } }];
+  if (end) and.push({ startsAt: { lte: end } });
+  and.push(...commonClauses(filters));
   return { AND: and };
+}
+
+export interface HappeningNowWhere {
+  multiDay: Prisma.EventWhereInput;
+  singleTime: Prisma.EventWhereInput;
+}
+
+/**
+ * Events that started before now and are not over: multi-day events by `endsAt`, single-time events
+ * within the 2h window. Null (row hidden) when the selected range has not begun yet (future weekend).
+ * Together with buildWhere this partitions upcoming vs ongoing at `now`.
+ */
+export function buildHappeningNowWhere(filters: EventFilters, now: Date): HappeningNowWhere | null {
+  if (resolveRange(filters.when, now).start.getTime() > now.getTime()) return null;
+  const common = commonClauses(filters);
+  return {
+    multiDay: { AND: [{ startsAt: { lt: now } }, { endsAt: { gte: now } }, ...common] },
+    singleTime: {
+      AND: [
+        { endsAt: null },
+        { startsAt: { lt: now } },
+        { startsAt: { gte: new Date(now.getTime() - SINGLE_EVENT_DURATION_MS) } },
+        ...common,
+      ],
+    },
+  };
+}
+
+/** Events that are not over yet, started or not. Feeds the city dropdown. */
+export function buildVisibleWhere(now: Date): Prisma.EventWhereInput {
+  return {
+    OR: [
+      { endsAt: { gte: now } },
+      { endsAt: null, startsAt: { gte: new Date(now.getTime() - SINGLE_EVENT_DURATION_MS) } },
+    ],
+  };
 }
 
 export function withPage(params: RawParams, page: number): string {
@@ -1860,14 +1995,45 @@ export function toEventCard(row: EventRow): EventCardData {
 }
 ```
 
-- [ ] **Step 5: Implement `lib/events/query.ts`**
+- [ ] **Step 5: Implement `lib/events/happening.ts`**
 
 ```ts
-import { PAGE_SIZE } from '@/lib/config';
+import { SINGLE_EVENT_DURATION_MS } from '@/lib/config';
+
+export interface Timed {
+  startsAt: Date;
+  endsAt: Date | null;
+}
+
+/** coalesce(endsAt, startsAt + 2h): single-time events count as lasting 2 hours. */
+export function effectiveEnd(event: Timed): Date {
+  return event.endsAt ?? new Date(event.startsAt.getTime() + SINGLE_EVENT_DURATION_MS);
+}
+
+/** Merge the two Happening now queries: soonest effective end first, ties on earlier start, then cut to `limit`. */
+export function mergeHappeningNow<T extends Timed>(multiDay: T[], singleTime: T[], limit: number): T[] {
+  return [...multiDay, ...singleTime]
+    .sort(
+      (a, b) =>
+        effectiveEnd(a).getTime() - effectiveEnd(b).getTime() || a.startsAt.getTime() - b.startsAt.getTime(),
+    )
+    .slice(0, limit);
+}
+```
+
+- [ ] **Step 6: Implement `lib/events/query.ts`**
+
+```ts
+import type { Prisma } from '@prisma/client';
+import { HAPPENING_NOW_LIMIT, PAGE_SIZE } from '@/lib/config';
 import { prisma } from '@/lib/db';
 import { toEventCard, type EventCardData } from '@/lib/events/card';
-import { buildWhere, type EventFilters } from '@/lib/events/filters';
+import { buildHappeningNowWhere, buildVisibleWhere, buildWhere, type EventFilters } from '@/lib/events/filters';
+import { mergeHappeningNow } from '@/lib/events/happening';
 
+const withSources = { sources: { include: { source: { select: { name: true } } } } } satisfies Prisma.EventInclude;
+
+/** Main grid: events that have not started yet. Priced first within a day. */
 export async function queryEvents(
   filters: EventFilters,
   now: Date = new Date(),
@@ -1877,15 +2043,40 @@ export async function queryEvents(
     where: buildWhere(filters, now),
     orderBy: [{ startDay: 'asc' }, { priceKnown: 'desc' }, { startsAt: 'asc' }],
     take: take + 1,
-    include: { sources: { include: { source: { select: { name: true } } } } },
+    include: withSources,
   });
   return { events: rows.slice(0, take).map(toEventCard), hasMore: rows.length > take };
 }
 
-/** Cities that currently have visible events, for the city multiselect. */
+/**
+ * Happening now row: started, not ended, soonest effective end first, max HAPPENING_NOW_LIMIT.
+ * Two queries because Prisma cannot order by coalesce(endsAt, startsAt + 2h). Each query already
+ * returns its own soonest-ending events, so the merged top N is contained in their union.
+ */
+export async function queryHappeningNow(filters: EventFilters, now: Date = new Date()): Promise<EventCardData[]> {
+  const where = buildHappeningNowWhere(filters, now);
+  if (!where) return [];
+  const [multiDay, singleTime] = await Promise.all([
+    prisma.event.findMany({
+      where: where.multiDay,
+      orderBy: { endsAt: 'asc' },
+      take: HAPPENING_NOW_LIMIT,
+      include: withSources,
+    }),
+    prisma.event.findMany({
+      where: where.singleTime,
+      orderBy: { startsAt: 'asc' },
+      take: HAPPENING_NOW_LIMIT,
+      include: withSources,
+    }),
+  ]);
+  return mergeHappeningNow(multiDay.map(toEventCard), singleTime.map(toEventCard), HAPPENING_NOW_LIMIT);
+}
+
+/** Cities that have events not yet over (grid or row), for the city multiselect. */
 export async function getCityOptions(now: Date = new Date()): Promise<string[]> {
   const rows = await prisma.event.findMany({
-    where: buildWhere({ cities: [], genres: [], page: 1 }, now),
+    where: buildVisibleWhere(now),
     distinct: ['city'],
     select: { city: true },
     orderBy: { city: 'asc' },
@@ -1894,16 +2085,16 @@ export async function getCityOptions(now: Date = new Date()): Promise<string[]> 
 }
 ```
 
-- [ ] **Step 6: Run tests and typecheck**
+- [ ] **Step 7: Run tests and typecheck**
 
 Run: `npx vitest run lib/events && npm run typecheck`
 Expected: PASS, no type errors.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add lib/events
-git commit -m "feat: add event filters, where-builder, card mapper, query"
+git commit -m "feat: add event filters, grid and happening-now queries, card mapper"
 ```
 
 ---
@@ -2339,7 +2530,7 @@ function specials(now: Date): RawEvent[] {
     // Must be hidden: fully ended.
     { source: 'goout', sourceUrl: `${HOSTS.goout}/s-ended-1`, title: 'Skončená výstava', venue: 'Dům umění', city: 'Brno', startsAt: at(now, -20, 10), endsAt: at(now, -2, 18), priceFrom: 100, rawGenre: 'Výstavy', imageUrl: null },
     { source: 'goout', sourceUrl: `${HOSTS.goout}/s-ended-2`, title: 'Včerajší koncert', venue: 'Majestic Music Club', city: 'Bratislava', startsAt: at(now, -1, 20), priceFrom: 12, rawGenre: 'Koncerty', imageUrl: null },
-    // 2h effective end: 30 min ago still shows, 3h ago is hidden.
+    // 2h effective end: 30 min ago shows in the Happening now row, 3h ago is hidden.
     { source: 'goout', sourceUrl: `${HOSTS.goout}/s-live-1`, title: 'Práve začína: klubová noc', venue: 'Subclub', city: 'Bratislava', startsAt: minutesFromNow(-30), priceFrom: 5, rawGenre: 'Elektronická hudba', imageUrl: null },
     { source: 'goout', sourceUrl: `${HOSTS.goout}/s-live-2`, title: 'Už skončilo: popoludňajší koncert', venue: 'Reduta', city: 'Bratislava', startsAt: minutesFromNow(-180), priceFrom: 5, rawGenre: 'Koncerty', imageUrl: null },
   ];
@@ -2533,6 +2724,12 @@ describe('dictionaries', () => {
     expect(DICTIONARIES.cs.priceFree).toBe('zdarma');
     expect(DICTIONARIES.en.priceFree).toBe('free');
   });
+
+  it('carry the happening-now labels', () => {
+    expect(DICTIONARIES.sk.happeningNow).toBe('Práve prebieha');
+    expect(DICTIONARIES.cs.happeningNow).toBe('Právě probíhá');
+    expect(DICTIONARIES.en.happeningNow).toBe('Happening now');
+  });
 });
 
 describe('fill', () => {
@@ -2580,6 +2777,7 @@ export interface Dictionary {
   buyOn: string;
   noEvents: string;
   loadMore: string;
+  happeningNow: string;
 }
 
 const sk: Dictionary = {
@@ -2610,6 +2808,7 @@ const sk: Dictionary = {
   buyOn: 'Kúpiť na {source}',
   noEvents: 'Nenašli sa žiadne udalosti. Skús upraviť filtre.',
   loadMore: 'Zobraziť viac',
+  happeningNow: 'Práve prebieha',
 };
 
 const cs: Dictionary = {
@@ -2640,6 +2839,7 @@ const cs: Dictionary = {
   buyOn: 'Koupit na {source}',
   noEvents: 'Žádné události nenalezeny. Zkus upravit filtry.',
   loadMore: 'Zobrazit více',
+  happeningNow: 'Právě probíhá',
 };
 
 const en: Dictionary = {
@@ -2670,6 +2870,7 @@ const en: Dictionary = {
   buyOn: 'Buy on {source}',
   noEvents: 'No events found. Try adjusting the filters.',
   loadMore: 'Load more',
+  happeningNow: 'Happening now',
 };
 
 export const DICTIONARIES: Record<Lang, Dictionary> = { sk, cs, en };
@@ -2807,11 +3008,11 @@ git commit -m "feat: add SK/CZ/EN dictionaries, language toggle, app shell"
 ### Task 11: Event grid, filter bar, card, and end-to-end check
 
 **Files:**
-- Create: `lib/format.ts`, `components/FilterBar.tsx`, `components/EventCard.tsx`
+- Create: `lib/format.ts`, `components/FilterBar.tsx`, `components/EventCard.tsx`, `components/HappeningNow.tsx`
 - Modify: `app/page.tsx`
 
 **Interfaces:**
-- Consumes: `parseFilters`, `withPage`, `queryEvents`, `getCityOptions`, `EventCardData`, `DICTIONARIES`, `LOCALES`, `fill`, `getLang`, `isMultiDay`, `TZ`, `WHEN_VALUES`, `GENRES`.
+- Consumes: `parseFilters`, `withPage`, `queryEvents`, `queryHappeningNow`, `getCityOptions`, `EventCardData`, `DICTIONARIES`, `LOCALES`, `fill`, `getLang`, `isMultiDay`, `TZ`, `WHEN_VALUES`, `GENRES`.
 - Produces: the finished home page. No new exports used by later tasks.
 
 - [ ] **Step 1: Write `lib/format.ts`**
@@ -2906,7 +3107,36 @@ export function EventCard({ event, lang, dict }: { event: EventCardData; lang: L
 }
 ```
 
-- [ ] **Step 3: Write `components/FilterBar.tsx`**
+- [ ] **Step 3: Write `components/HappeningNow.tsx`**
+
+Horizontal scroll row above the grid. Renders nothing when there are no events.
+
+```tsx
+import { EventCard } from '@/components/EventCard';
+import type { EventCardData } from '@/lib/events/card';
+import type { Dictionary, Lang } from '@/lib/i18n/dictionaries';
+
+export function HappeningNow({ events, lang, dict }: { events: EventCardData[]; lang: Lang; dict: Dictionary }) {
+  if (events.length === 0) return null;
+  return (
+    <section aria-labelledby="happening-now" className="mb-8">
+      <h2 id="happening-now" className="mb-3 flex items-center gap-2 text-lg font-semibold">
+        <span className="inline-block h-2.5 w-2.5 rounded-full bg-red-500" aria-hidden="true" />
+        {dict.happeningNow}
+      </h2>
+      <ul className="-mx-4 flex snap-x snap-mandatory gap-4 overflow-x-auto px-4 pb-3">
+        {events.map((event) => (
+          <li key={event.id} className="w-72 shrink-0 snap-start">
+            <EventCard event={event} lang={lang} dict={dict} />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+```
+
+- [ ] **Step 4: Write `components/FilterBar.tsx`**
 
 ```tsx
 'use client';
@@ -3051,13 +3281,14 @@ export function FilterBar({ cities, selected, dict, locale }: Props) {
 }
 ```
 
-- [ ] **Step 4: Replace `app/page.tsx`**
+- [ ] **Step 5: Replace `app/page.tsx`**
 
 ```tsx
 import Link from 'next/link';
 import { EventCard } from '@/components/EventCard';
 import { FilterBar } from '@/components/FilterBar';
-import { getCityOptions, queryEvents } from '@/lib/events/query';
+import { HappeningNow } from '@/components/HappeningNow';
+import { getCityOptions, queryEvents, queryHappeningNow } from '@/lib/events/query';
 import { parseFilters, withPage, type RawParams } from '@/lib/events/filters';
 import { DICTIONARIES, LOCALES } from '@/lib/i18n/dictionaries';
 import { getLang } from '@/lib/i18n/server';
@@ -3067,7 +3298,11 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   const dict = DICTIONARIES[lang];
   const filters = parseFilters(params);
   const now = new Date();
-  const [{ events, hasMore }, cityOptions] = await Promise.all([queryEvents(filters, now), getCityOptions(now)]);
+  const [{ events, hasMore }, happeningNow, cityOptions] = await Promise.all([
+    queryEvents(filters, now),
+    queryHappeningNow(filters, now),
+    getCityOptions(now),
+  ]);
 
   return (
     <>
@@ -3078,8 +3313,9 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
         locale={LOCALES[lang]}
       />
       <div className="mx-auto max-w-7xl px-4 py-6">
+        <HappeningNow events={happeningNow} lang={lang} dict={dict} />
         {events.length === 0 ? (
-          <p className="py-16 text-center text-zinc-500">{dict.noEvents}</p>
+          happeningNow.length === 0 && <p className="py-16 text-center text-zinc-500">{dict.noEvents}</p>
         ) : (
           <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {events.map((event) => (
@@ -3106,42 +3342,43 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 }
 ```
 
-- [ ] **Step 5: Static checks**
+- [ ] **Step 6: Static checks**
 
 Run: `npm test && npm run typecheck && npm run build`
 Expected: all PASS; build lists `/` as a dynamic route.
 
-- [ ] **Step 6: Verify in the browser with the `/browse` skill**
+- [ ] **Step 7: Verify in the browser with the `/browse` skill**
 
 Start the app in the background: `npm run dev` (port 3000). Make sure the dev DB is seeded (`npm run db:seed`). Then, using the `/browse` skill only (never other browser tools), open `http://localhost:3000` and check each item, taking a screenshot and reading console errors at the end:
 
 1. Grid renders with cards; genre gradient shows on cards without images; no console errors.
-2. Absent: "Včerajší koncert", "Skončená výstava", "Už skončilo: popoludňajší koncert". Present: "Práve začína: klubová noc" (started 30 min ago).
-3. Ongoing exhibitions ("Výstava: Světlo a stín", "Nové smery: Súčasné umenie") show a date range, not a single time.
-4. City filter: open the city dropdown, tick Praha. URL gets `?city=Praha`, and only Praha events remain. Tick Brno too: URL has two `city=` params.
-5. Genre chips: click "Elektronika". URL gets `genre=electronic`; the grid narrows.
-6. Date control: click "Dnes". Only events today remain (or the empty-state message shows if none). Click "Kedykoľvek" and the `when` param disappears.
-7. Max price: drag the slider to 0. After about 300 ms the URL has `maxPrice=0`; only free and price-unknown events remain, and unknown ones read "cena neuvedená". Drag to the right end and `maxPrice` disappears.
-8. Within one day, priced events come before "cena neuvedená" events (compare two events on the same date).
-9. "Metal Tribute Night" shows "od 890 Kč" (not 35 €) and two buy links; "Aurora Bloom – Tour 2026" shows two buy links (fuzzy merge).
-10. Language toggle: click CZ, then EN. UI strings, price labels and the `<html lang>` change; event titles do not. Reload keeps the language (cookie).
-11. Load more: if the grid is capped at 24, the "Zobraziť viac" link adds `page=2` and the list grows without jumping to the top.
-12. "Clear filters" resets to `/`.
+2. Absent everywhere (grid and row): "Včerajší koncert", "Skončená výstava", "Už skončilo: popoludňajší koncert".
+3. A "Práve prebieha" row sits above the grid and scrolls horizontally. In this order (soonest effective end first) it holds "Práve začína: klubová noc" (started 30 min ago, ends in about 90 min), "Výstava: Světlo a stín", "Nové smery: Súčasné umenie". The exhibitions show a date range, the club night shows a single time. None of the three appear in the main grid, and the grid is not headed by ongoing events.
+4. Row and filters: with `city=Praha` the row keeps only "Výstava: Světlo a stín"; with genre "Koncert" the row is empty and disappears; with `maxPrice=0` the row keeps only "Nové smery: Súčasné umenie" (free). Click "Dnes" and the row stays. Unless now is inside Fri 18:00 to Sun, click "Víkend" and the row disappears.
+5. City filter: open the city dropdown, tick Praha. URL gets `?city=Praha`, and only Praha events remain in the grid. Tick Brno too: URL has two `city=` params.
+6. Genre chips: click "Elektronika". URL gets `genre=electronic`; the grid narrows.
+7. Date control: click "Dnes". Only events today remain in the grid (or the empty-state message shows if the grid and the row are both empty). Click "Kedykoľvek" and the `when` param disappears.
+8. Max price: drag the slider to 0. After about 300 ms the URL has `maxPrice=0`; only free and price-unknown events remain, and unknown ones read "cena neuvedená". Drag to the right end and `maxPrice` disappears.
+9. Within one day, priced events come before "cena neuvedená" events (compare two events on the same date).
+10. "Metal Tribute Night" shows "od 890 Kč" (not 35 €) and two buy links; "Aurora Bloom – Tour 2026" shows two buy links (fuzzy merge).
+11. Language toggle: click CZ, then EN. UI strings, price labels, the row heading ("Právě probíhá", "Happening now") and the `<html lang>` change; event titles do not. Reload keeps the language (cookie).
+12. Load more: if the grid is capped at 24, the "Zobraziť viac" link adds `page=2` and the list grows without jumping to the top; the row is unchanged.
+13. "Clear filters" resets to `/`.
 
 Fix any failure by editing the relevant task's file, re-running the static checks, and re-checking the affected items. Stop the dev server when done.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add lib/format.ts components app/page.tsx
-git commit -m "feat: add event grid, filter bar, event card"
+git commit -m "feat: add event grid, happening-now row, filter bar, event card"
 ```
 
 ---
 
 ## Self-Review (done while writing)
 
-**Spec coverage:** Schema with `EventSource`, `endsAt`, `startDay`, `priceKnown` (Task 2). Normalizer: genre, city, text, URL, fingerprint (Tasks 4, 5). Dedupe: fuzzy, price, blank fills (Task 6). Ingest order URL, fingerprint, fuzzy, insert with P2002 retry (Task 8). Date ranges including weekend edge cases (Task 3). Effective-end and price filters, sort order, cumulative paging (Tasks 3, 7). Seed with fuzzy, currency, free, unknown, multi-day, ended and 30-min/3h cases (Task 9). i18n and price labels (Task 10). UI grid, filter bar, card (Task 11). Unit tests for normalizer, dedupe, dates, filters (Tasks 3 to 7). Digest, auth and scrapers are later plans, as specified.
+**Spec coverage:** Schema with `EventSource`, `endsAt`, `startDay`, `priceKnown` (Task 2). Normalizer: genre, city, text, URL, fingerprint (Tasks 4, 5). Dedupe: fuzzy, price, blank fills (Task 6). Ingest order URL, fingerprint, fuzzy, insert with P2002 retry (Task 8). Date ranges including weekend edge cases (Task 3). Grid vs Happening now split at `now`, effective-end (2h) handling, price filters, sort order, cumulative paging (Tasks 3, 7, 11). Seed with fuzzy, currency, free, unknown, multi-day, ended and 30-min/3h cases (Task 9). i18n and price labels (Task 10). UI grid, filter bar, card (Task 11). Unit tests for normalizer, dedupe, dates, filters (Tasks 3 to 7). Digest, auth and scrapers are later plans, as specified.
 
 **Type consistency:** `NormalizedEvent` fields (`url`, `price`, `priceCurrency`, `sourceSlug`) are defined in Task 5 and used the same way in Task 8. `EventFilters`, `RawParams`, `EventRow`, `EventCardData` are defined in Task 7 and used in Task 11. `Dictionary`, `Lang`, `LOCALES`, `fill` are defined in Task 10 and used in Task 11.
 

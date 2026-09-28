@@ -151,9 +151,10 @@ Event `currency` derives from `country`. An `EventSource` in a different currenc
 
 ## Filtering and visibility
 
-- Effective end = `coalesce(endsAt, startsAt + 2h)`. Single-time events count as lasting 2 hours, so an event that started 30 minutes ago still shows.
-- Feed never shows fully-ended events. Base range start = `now`.
-- Overlap filter for date ranges: `startsAt <= rangeEnd AND effectiveEnd >= rangeStart`. In Prisma: `startsAt <= end` AND (`endsAt >= start` OR (`endsAt` null AND `startsAt >= start - 2h`)).
+- Effective end = `coalesce(endsAt, startsAt + 2h)`. Single-time events count as lasting 2 hours.
+- **Main grid**: events with `startsAt >= rangeStart` (and `startsAt <= rangeEnd` when the range has an end). Base range start = `now`. Events that already started never appear in the grid, so long-running events never pin to the top of it.
+- **Happening now row**: events with `startsAt < now` and effective end `>= now`, max 12, sorted by effective end ascending (ending soonest first). The same city, genre and price filters apply. It is shown only when the selected range starts at now (every range except a weekend that has not begun yet) and hidden otherwise. An event starting exactly at `now` is in the grid, not the row. An event that started 30 minutes ago shows in the row.
+- Fully ended events (effective end before now) appear nowhere.
 - Price semantics: `priceFrom = 0` is free, `priceFrom = null` is unknown.
 - `maxPrice` filter: show events with `priceFrom <= maxPrice` OR `priceFrom` null. Unknown-price events show the label "price TBA" (see i18n). A "hide unknown price" checkbox is out of scope for plan 1.
 - `maxPrice` is in EUR. Because `priceFrom` is stored in the event's own currency, CZK events are compared against `maxPrice * CZK_PER_EUR`, a fixed constant in config (initial value 25). The match is: (`currency = EUR` AND `priceFrom <= maxPrice`) OR (`currency = CZK` AND `priceFrom <= maxPrice * CZK_PER_EUR`) OR `priceFrom` null.
@@ -166,6 +167,7 @@ Event `currency` derives from `country`. An `EventSource` in a different currenc
 
 - `/` server component reads `city[]`, `genre[]`, `when`, `maxPrice`, `page` from search params and queries Prisma directly.
 - `FilterBar` (client, sticky): city multiselect, genre chips, date segmented control (today/weekend/week/month), max-price slider (debounced). Updates URL via `router.replace`.
+- "Happening now" row above the grid: horizontal scroll of `EventCard`s, hidden when empty. Label: "Práve prebieha" (sk) / "Právě probíhá" (cs) / "Happening now" (en).
 - `EventCard`: image (gradient fallback), title, venue, date (range for multi-day), price ("from X", "free" when 0, "price TBA" when null), one "buy on {Source.name}" link per `EventSource`, cheapest first, showing that source's price when known.
 - Images: plain `<img>` until scrapers reveal hosts for `next/image` `remotePatterns`.
 - Header: SK/CZ/EN toggle.
@@ -181,8 +183,8 @@ Event `currency` derives from `country`. An `EventSource` in a different currenc
 - Cities: Bratislava, Praha, Brno, Košice. All 7 genres.
 - Dates spread over the next 6 weeks, relative to run time.
 - Some events with 2-3 sources, including one duplicate with a slightly different title and venue name (fuzzy path) and one with a different-currency source.
-- A few multi-day events with `endsAt` (exhibitions, festival), and one already ended to prove it is hidden.
-- Some free events (`priceFrom = 0`), some unknown-price events (null), and one single-time event that started 30 minutes before seeding, to prove the 2h effective end.
+- A few multi-day events with `endsAt` (exhibitions, festival), and one already ended to prove it is hidden. Ongoing exhibitions appear in the Happening now row.
+- Some free events (`priceFrom = 0`), some unknown-price events (null), and one single-time event that started 30 minutes before seeding (in the Happening now row) and one that started 3 hours before (hidden), to prove the 2h effective end.
 
 ## Testing (plan 1)
 
@@ -190,7 +192,7 @@ Vitest unit tests, no DB or network:
 - `normalize`: genre map (SK/CZ/EN keywords, fallback), city aliases (`BA`, `Prague`, unknown passthrough), `normalizeText`, `canonicalizeUrl`, fingerprint stability across casing, diacritics, punctuation, and Prague-date boundaries.
 - `dedupe`: `levenshtein`, `titleDistance` thresholds around 0.2, `pickFuzzyMatch` (picks lowest distance, rejects >= 0.2, empty candidates), `computeEventPrice` (min, same-currency only, all-null).
 - `dates`: `resolveRange` for each `when`, including the weekend edge cases (mid-weekend, after Sunday).
-- `events/query`: pure where-clause builder: effective-end overlap (2h default), `maxPrice` with currency conversion and null-price inclusion, `0` treated as a real price. `deriveSortFields`: `startDay` at Prague day boundaries, `priceKnown` for 0 vs null.
+- `events/filters`: pure where-clause builders. Main grid (`startsAt >= rangeStart`), Happening now (started, not ended, 2h default for single-time events, hidden for a future weekend, same city/genre/price filters), `maxPrice` with currency conversion and null-price inclusion, `0` treated as a real price. `events/happening`: `effectiveEnd` and the merge/sort/limit of the row. `deriveSortFields`: `startDay` at Prague day boundaries, `priceKnown` for 0 vs null.
 
 Ingest DB flow is verified by running the seed against the Neon dev branch and inspecting the result, not by automated tests, in plan 1.
 
