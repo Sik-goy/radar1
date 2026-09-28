@@ -1,7 +1,7 @@
 'use client';
 
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useState, useTransition } from 'react';
+import { useEffect, useRef, useState, useTransition } from 'react';
 import { WHEN_VALUES, type When } from '@/lib/dates';
 import { formatMoney } from '@/lib/format';
 import { fill, type Dictionary } from '@/lib/i18n/dictionaries';
@@ -27,12 +27,34 @@ export function FilterBar({ cities, selected, dict, locale }: Props) {
   const searchParams = useSearchParams();
   const [isPending, startTransition] = useTransition();
 
+  // useSearchParams() only changes once the server has re-rendered, so rapid clicks (and the debounced
+  // slider) must build on the query we last asked for, not on the last one that landed.
+  const committed = searchParams.toString();
+  const committedRef = useRef(committed);
+  committedRef.current = committed;
+  const requestedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (requestedRef.current === committed) requestedRef.current = null;
+  }, [committed]);
+
+  function navigate(query: string) {
+    requestedRef.current = query;
+    startTransition(() => router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false }));
+  }
+
   function update(mutate: (params: URLSearchParams) => void) {
-    const params = new URLSearchParams(searchParams.toString());
+    const params = new URLSearchParams(requestedRef.current ?? committedRef.current);
     mutate(params);
     params.delete('page');
-    const query = params.toString();
-    startTransition(() => router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false }));
+    navigate(params.toString());
+  }
+
+  const priceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  function clearFilters() {
+    clearTimeout(priceTimer.current);
+    setPrice(SLIDER_MAX);
+    navigate('');
   }
 
   function toggle(key: 'city' | 'genre', value: string) {
@@ -50,11 +72,11 @@ export function FilterBar({ cities, selected, dict, locale }: Props) {
   }, [selected.maxPrice]);
   useEffect(() => {
     if (price === (selected.maxPrice ?? SLIDER_MAX)) return;
-    const id = setTimeout(
+    priceTimer.current = setTimeout(
       () => update((p) => (price >= SLIDER_MAX ? p.delete('maxPrice') : p.set('maxPrice', String(price)))),
       300,
     );
-    return () => clearTimeout(id);
+    return () => clearTimeout(priceTimer.current);
   }, [price]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cityOptions = [...new Set([...cities, ...selected.cities])].sort((a, b) => a.localeCompare(b));
@@ -129,7 +151,7 @@ export function FilterBar({ cities, selected, dict, locale }: Props) {
           <button
             type="button"
             className="text-sm text-zinc-600 underline"
-            onClick={() => startTransition(() => router.replace(pathname, { scroll: false }))}
+            onClick={clearFilters}
           >
             {dict.clearFilters}
           </button>

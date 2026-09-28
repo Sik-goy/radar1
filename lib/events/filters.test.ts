@@ -33,6 +33,11 @@ describe('parseFilters', () => {
     expect(parseFilters({ maxPrice: 'Infinity' }).maxPrice).toBeUndefined();
   });
 
+  it('ignores a maxPrice that overflows once converted to CZK', () => {
+    expect(parseFilters({ maxPrice: '1e308' }).maxPrice).toBeUndefined();
+    expect(parseFilters({ maxPrice: '1e300' }).maxPrice).toBe(1e300);
+  });
+
   it('clamps page to 1..50', () => {
     expect(parseFilters({ page: '3' }).page).toBe(3);
     expect(parseFilters({ page: '0' }).page).toBe(1);

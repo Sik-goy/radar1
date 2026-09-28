@@ -25,7 +25,8 @@ export function parseFilters(params: RawParams): EventFilters {
 
   const priceRaw = first(params.maxPrice)?.trim();
   const priceNum = priceRaw ? Number(priceRaw) : Number.NaN;
-  const maxPrice = Number.isFinite(priceNum) && priceNum >= 0 ? priceNum : undefined;
+  // The CZK bound is maxPrice * CZK_PER_EUR, which must stay finite too or Prisma rejects the query.
+  const maxPrice = Number.isFinite(priceNum * CZK_PER_EUR) && priceNum >= 0 ? priceNum : undefined;
 
   const pageNum = Math.floor(Number(first(params.page)));
   const page = Number.isFinite(pageNum) && pageNum >= 1 ? Math.min(pageNum, MAX_PAGE) : 1;

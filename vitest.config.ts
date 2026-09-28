@@ -5,9 +5,10 @@ const root = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig({
   resolve: { alias: [{ find: /^@\//, replacement: root }] },
+  oxc: { jsx: { runtime: 'automatic' } },
   test: {
     environment: 'node',
-    include: ['**/*.test.ts'],
+    include: ['**/*.test.{ts,tsx}'],
     exclude: ['node_modules', '.next'],
   },
 });
