@@ -45,13 +45,17 @@ export async function upsertRawEvents(raws: RawEvent[], now: Date = new Date()):
   return stats;
 }
 
+// Prisma's defaults (2s to start, 5s to finish) are too tight for a remote pooled Neon database:
+// each item runs ~8 sequential queries.
+const TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
+
 async function ingestWithRetry(n: NormalizedEvent, sourceId: string, now: Date): Promise<Outcome> {
   try {
-    return await prisma.$transaction((tx) => ingestOne(tx, n, sourceId, now));
+    return await prisma.$transaction((tx) => ingestOne(tx, n, sourceId, now), TX_OPTIONS);
   } catch (e) {
     // Unique violation on fingerprint or url: another writer got there first. Redo as a merge.
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-      return prisma.$transaction((tx) => ingestOne(tx, n, sourceId, now));
+      return prisma.$transaction((tx) => ingestOne(tx, n, sourceId, now), TX_OPTIONS);
     }
     throw e;
   }

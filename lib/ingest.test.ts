@@ -53,6 +53,18 @@ describe('upsertRawEvents', () => {
     expect(stats.skipped).toEqual([{ url: 'https://goout.net/e/1', reason: 'boom' }]);
   });
 
+  it('gives each item transaction enough time for a remote database', async () => {
+    transaction.mockResolvedValueOnce('created');
+    await upsertRawEvents([raw()]);
+    expect(transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ maxWait: expect.any(Number), timeout: expect.any(Number) }),
+    );
+    const options = transaction.mock.calls[0][1] as { maxWait: number; timeout: number };
+    expect(options.maxWait).toBeGreaterThanOrEqual(10_000);
+    expect(options.timeout).toBeGreaterThanOrEqual(30_000);
+  });
+
   it('retries once as a merge on a unique-constraint race', async () => {
     const race = new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test' });
     transaction.mockRejectedValueOnce(race).mockResolvedValueOnce('merged');
