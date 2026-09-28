@@ -116,7 +116,7 @@ Expected: a git repo exists and the spec commit is present. If not, stop and ask
 
 ```bash
 npm install next@^15 react@^19 react-dom@^19 date-fns@^4 @date-fns/tz@^1
-npm install -D typescript @types/node @types/react@^19 @types/react-dom@^19 tailwindcss@^4 @tailwindcss/postcss@^4 postcss vitest tsx dotenv
+npm install -D typescript@^5 @types/node @types/react@^19 @types/react-dom@^19 tailwindcss@^4 @tailwindcss/postcss@^4 postcss vitest tsx dotenv
 ```
 
 - [ ] **Step 4: Write config files**

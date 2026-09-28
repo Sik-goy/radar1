@@ -17,6 +17,9 @@ coverage/
 # vercel
 .vercel/
 
+# agent workspace (ledger, briefs)
+.superpowers/
+
 # logs
 npm-debug.log*
 yarn-debug.log*
