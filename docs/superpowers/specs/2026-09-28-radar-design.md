@@ -262,32 +262,44 @@ Ingest DB flow is verified by running the seed against the Neon dev branch and i
   Online event, Ostatné, Pre deti, Prednáška, Show, Šport, Workshop) — prefer
   it over the 7-value nav category when present, since it disambiguates
   exhibitions (`Kultúra`) from concerts, which the 7-value list cannot.
-- **Event pages** (`/sk/listky/{slug}/`) come in two shapes:
-  - **Single-date**: one header line — title, `DD.MM.YYYY HH:MM`, then a
-    comma-separated venue address (`<venue name>, <street>, <postal code +
-    city>` — the postal code prefix, `^\d{3}\s?\d{2}\s+`, is stripped before
-    the last segment goes to `normalizeCity`; the street segment is
-    discarded, `RawEvent` has no address field).
-  - **Tour pages** (recurring acts, e.g. a Christmas concert series): the
-    same header line repeated once per stop, each with its own date, time
-    and venue, and a location suffix in the title when a city repeats
-    twice (`Nitra`, `Nitra 2`). Each stop is its own `RawEvent`; the page's
-    own `sourceUrl` is shared across stops (deep-link target for all of
-    them, since predpredaj doesn't give each stop its own URL) — this is
-    fine, `EventSource.url` uniqueness is scoped to the *ingested* event,
-    not to the page, and the first stop to be ingested wins the URL,
-    later stops fall through to fingerprint/fuzzy match and get created
-    as their own events with their own (synthetic, non-navigable-to-a-
-    single-stop) `sourceUrl` collision — **note for the plan**: this needs
-    a decision (append a stable per-stop query param to the shared URL,
-    e.g. `?date=DD.MM.YYYY`, so each stop gets a distinct, real,
-    deep-linkable `EventSource.url` back to the same page).
-  - One observed page had a **stale slug vs. live date** (URL says
-    `-2026-09-06`, the rendered page says `02.09.2027` — a reschedule the
-    site never renamed the URL for). A pinning test should cover trusting
-    the rendered date over anything inferred from the URL.
-  - **Price**: a list of ticket tiers, each `Cena X,XX €` (comma
-    decimal, narrow-space thousands where relevant); `priceFrom` = the
+- **Category listing markup** (confirmed from the fixture, not guessed):
+  each card is `article.box`, with `.badge` = category text, `h2.box-item-
+  title > span` = title, `img.box-item-img[src]` = thumbnail, and the
+  detail link is the `<a class="box-item-btn">` inside the desktop
+  (`.box-content.d-none.d-md-block`) variant — the mobile variant repeats
+  the same title/badge with no link, so selecting `.box-item-btn` alone
+  (not the whole card) avoids picking up a stray duplicate.
+- **Event pages** (`/sk/listky/{slug}/`) come in two shapes, both confirmed
+  from real fixtures:
+  - **Single-date**: `h1` = title; the following `<p class="mb-4">` holds
+    two lines separated by `<br>` — `DD.MM.YYYY HH:MM` (an `<i>` icon
+    precedes it, strip it) then a comma-separated venue address (`<venue
+    name>, <street>, <postal code + city>` — the postal code prefix,
+    `^\d{3}\s?\d{2}\s+`, is stripped before the last segment goes to
+    `normalizeCity`; the street segment is discarded, `RawEvent` has no
+    address field). Price tiers (see below) follow further down the page.
+  - **Tour pages** (recurring acts, e.g. a Christmas concert series): a
+    `<ul>` of `<li class="list-group-item"><a href="/sk/listky/{own-
+    slug}/">` — **each stop already has its own real, unique detail page
+    URL** (e.g. `…-nitra-1-2026-12-13/`, `…-nitra-2-2026-12-13/`), so
+    there is no shared-URL problem to solve. Each `<li>` carries everything
+    needed inline: `<strong>` = that stop's title (already includes a
+    location suffix when a city repeats, `Nitra`, `Nitra 2`), `<span>` =
+    `DD.MM.YYYY HH:MM - <venue address>` (same address format as above).
+    **Scrape each stop directly from this list — do not additionally fetch
+    each stop's own page**: the hub page carries zero `Cena`/price markup
+    (confirmed on the fixture), so the extra round trip buys nothing but
+    load on their server for our purposes. `priceFrom` is `null` for every
+    stop scraped this way (a real, legitimate value, not a failure) since
+    price tiers never render on the hub page. If a future pass wants
+    per-stop pricing, that is a second, explicit fetch of each stop's own
+    URL, added as its own task, not assumed here.
+  - One observed **single-date** page had a **stale slug vs. live date**
+    (URL says `-2026-09-06`, the rendered page says `02.09.2027` — a
+    reschedule the site never renamed the URL for). A pinning test should
+    cover trusting the rendered date over anything inferred from the URL.
+  - **Price** (single-date pages only, per the above): a list of ticket
+    tiers, each `Cena X,XX\u00A0€` (comma decimal); `priceFrom` = the
     minimum across tiers. No free (`0,00 €`) example was seen live, but the
     format implies it renders the same way as any other tier — treat it as
     a real free price, not absence. A page with no tiers rendered (not yet
