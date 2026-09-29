@@ -8,8 +8,8 @@ const fixture = (name: string) => readFileSync(join(__dirname, '..', '__fixtures
 describe('parseCategoryListing', () => {
   const cards = parseCategoryListing(fixture('predpredaj-category-koncert.html'));
 
-  it('parses every event card on the page', () => {
-    expect(cards).toHaveLength(80);
+  it('parses every real event card on the page, ignoring the one non-/listky/ card mixed in', () => {
+    expect(cards).toHaveLength(79);
   });
 
   it('gets the title and absolute detail-page URL right', () => {
@@ -17,6 +17,26 @@ describe('parseCategoryListing', () => {
       title: 'Filip Jančík - Dokonalé Vianoce 2026',
       href: 'https://predpredaj.zoznam.sk/sk/listky/filip-jancik-dokonale-vianoce-2026/',
     });
+  });
+
+  it('ignores non-/listky/ cards (presale links, gift-voucher promos)', () => {
+    const html = `
+      <article class="box"><div class="box-content d-none d-md-block">
+        <h2 class="box-item-title"><span>Real Event</span></h2>
+        <a href="/sk/listky/real-event/" class="box-item-btn">Detail</a>
+      </div></article>
+      <article class="box"><div class="box-content d-none d-md-block">
+        <h2 class="box-item-title"><span>Presale Game</span></h2>
+        <a href="/sk/presale/hk-nitra-rogle-bk-2026-10-13/" class="box-item-btn">Detail</a>
+      </div></article>
+      <article class="box"><div class="box-content d-none d-md-block">
+        <h2 class="box-item-title"><span>Gift Vouchers</span></h2>
+        <a href="/sk/darcekove-poukazy/" class="box-item-btn">Detail</a>
+      </div></article>
+    `;
+    expect(parseCategoryListing(html)).toEqual([
+      { title: 'Real Event', href: 'https://predpredaj.zoznam.sk/sk/listky/real-event/' },
+    ]);
   });
 });
 
@@ -61,5 +81,31 @@ describe('parseEventDetail: tour page', () => {
     expect(detail.imageUrl).toBe(
       'https://cdn-predpredaj.zoznam.sk/media/tickets/images/filij_jancik_vianocne_turne_2026_1200x1200_SK_B.jpg',
     );
+  });
+});
+
+describe('parseEventDetail: page with an unescaped quote breaking its JSON-LD (real predpredaj bug)', () => {
+  // richard-muller-recital-2026: a real live page whose JSON-LD description contains an unescaped
+  // quote ("...úprimnosť," opisuje...), which plain JSON.parse rejects outright. It is actually a tour
+  // hub page (7 real per-city stops) — recovery should fall through to the DOM tour-stop parser.
+  const detail = parseEventDetail(fixture('predpredaj-event-malformed-jsonld.html'));
+
+  it('recovers via the stray-quote-escaping retry and finds every tour stop', () => {
+    if (detail.kind !== 'tour') throw new Error('expected a tour');
+    expect(detail.stops).toHaveLength(7);
+  });
+
+  it('gets the first stop\'s title, date, venue and city right', () => {
+    if (detail.kind !== 'tour') throw new Error('expected a tour');
+    const first = detail.stops[0];
+    expect(first.title).toBe('Richard Müller Komorný Recitál - Šaľa');
+    expect(first.startsAt.toISOString()).toBe('2026-10-04T16:00:00.000Z');
+    expect(first.venue).toBe('Dom kultúry Šaľa');
+    expect(first.city).toBe('Šaľa');
+  });
+
+  it('recovers the image from the repaired JSON-LD', () => {
+    if (detail.kind !== 'tour') throw new Error('expected a tour');
+    expect(detail.imageUrl).toBe('https://cdn-predpredaj.zoznam.sk/media/tickets/images/RM_recital_26_predpredaj_350_x_3503.jpg');
   });
 });

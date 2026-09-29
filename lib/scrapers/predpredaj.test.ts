@@ -130,16 +130,29 @@ describe('scrapePredpredaj', () => {
     expect(raws[0].title).toBe('Fine');
   });
 
-  it('skips one item whose detail page has unparseable JSON-LD and keeps going', async () => {
+  it('recovers an event whose JSON-LD has an unescaped quote via the escaping retry', async () => {
+    const fetchImpl = fetchImplFrom({
+      [ROBOTS_URL]: ROBOTS_TXT,
+      [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Recovered', slug: 'recovered' }]),
+      // An unescaped quote inside a JSON-LD string value — real, live-observed predpredaj data
+      // (a description containing a quoted phrase the site forgot to escape).
+      [`${PREDPREDAJ_BASE_URL}/sk/listky/recovered/`]: `<script type="application/ld+json">[{"name":"Recovered","startDate":"2026-12-01 20:00","location":{"name":"Klub, Ulica, Mesto","address":"Mesto"},"image":"https://img/x.jpg","description":"a "quoted" phrase"}]</script>`,
+    });
+
+    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+
+    expect(raws).toHaveLength(1);
+    expect(raws[0].title).toBe('Recovered');
+  });
+
+  it('skips one item whose page has no usable shape at all (no JSON-LD, no tour stops, no single-date markup) and keeps going', async () => {
     const fetchImpl = fetchImplFrom({
       [ROBOTS_URL]: ROBOTS_TXT,
       [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([
-        { title: 'Malformed', slug: 'malformed' },
+        { title: 'Broken', slug: 'broken' },
         { title: 'Fine', slug: 'fine' },
       ]),
-      // An unescaped quote inside a JSON-LD string value — real, live-observed predpredaj data.
-      // No amount of control-character escaping can recover this; it must be skipped, not crash the run.
-      [`${PREDPREDAJ_BASE_URL}/sk/listky/malformed/`]: `<script type="application/ld+json">[{"name":"Malformed","startDate":"2026-12-01 20:00","location":{"name":"Klub, Ulica, Mesto","address":"Mesto"},"image":"https://img/x.jpg","description":"a "quoted" phrase"}]</script>`,
+      [`${PREDPREDAJ_BASE_URL}/sk/listky/broken/`]: `<div>nothing recognizable here</div>`,
       [`${PREDPREDAJ_BASE_URL}/sk/listky/fine/`]: singleDetailHtml('Fine', '2026-12-01 20:00', 'Nitra'),
     });
 

@@ -3,6 +3,7 @@ import {
   decodeHtmlEntities,
   minPriceFromText,
   parseIsoLikeDateTime,
+  parseSlovakDateTime,
   splitAddress,
   splitDateAndAddress,
   stripPostalCode,
@@ -36,8 +37,16 @@ export function parseCategoryListing(html: string): ListingCard[] {
     const $link = $(el);
     const href = $link.attr('href');
     if (!href) return;
+    const url = new URL(href, PREDPREDAJ_BASE_URL);
+    if (!url.pathname.startsWith('/sk/listky/')) {
+      // The category page also links a handful of non-event cards (external presale pages, a
+      // gift-voucher promo) through the same .box-item-btn markup. Not garbage worth a warning —
+      // just not an event.
+      console.debug(`[predpredaj] ignoring non-event card: ${url.toString()}`);
+      return;
+    }
     const title = decodeHtmlEntities($link.closest('.box-content').find('.box-item-title span').first().text().trim());
-    cards.push({ title, href: new URL(href, PREDPREDAJ_BASE_URL).toString() });
+    cards.push({ title, href: url.toString() });
   });
   return cards;
 }
@@ -101,43 +110,73 @@ function sanitizeJsonLd(raw: string): string {
   return result;
 }
 
-function readJsonLd($: ReturnType<typeof cheerio.load>): JsonLdEvent {
-  const raw = $('script[type="application/ld+json"]').first().html() ?? '[]';
-  const parsed = JSON.parse(sanitizeJsonLd(raw)) as JsonLdEvent | JsonLdEvent[];
+/**
+ * A second, more aggressive repair pass used only when the plain control-character fix still
+ * doesn't parse. Handles both raw control characters *and* an unescaped quote inside a string value
+ * (e.g. a quoted phrase in a description the site forgot to escape) in one traversal — running them
+ * as two independent passes doesn't compose: the first pass's (wrong) idea of where a string ends
+ * leaves later content — including further control characters — outside its view entirely.
+ */
+function sanitizeJsonLdAggressive(raw: string): string {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString && !escaped) {
+      if (ch === '\n' || ch === '\r' || ch === '\t') {
+        result += ch === '\n' ? '\\n' : ch === '\r' ? '\\r' : '\\t';
+        continue;
+      }
+      if (ch === '"') {
+        // Look ahead past whitespace: a real string terminator is followed by a JSON structural
+        // character. Anything else means this quote was content that should have been escaped.
+        let j = i + 1;
+        while (j < raw.length && /\s/.test(raw[j])) j++;
+        const next = raw[j];
+        const looksLikeRealEnd = next === undefined || next === ',' || next === '}' || next === ']' || next === ':';
+        if (looksLikeRealEnd) {
+          inString = false;
+          result += ch;
+        } else {
+          result += '\\"';
+        }
+        continue;
+      }
+    }
+    result += ch;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+    } else if (ch === '"') {
+      inString = true;
+    }
+  }
+  return result;
+}
+
+function tryParseJsonLd(text: string): JsonLdEvent | JsonLdEvent[] | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** Returns null when the JSON-LD block is absent or unrecoverable — the caller falls back to the DOM. */
+function readJsonLd($: ReturnType<typeof cheerio.load>): JsonLdEvent | null {
+  const raw = $('script[type="application/ld+json"]').first().html();
+  if (!raw) return null;
+  const parsed = tryParseJsonLd(sanitizeJsonLd(raw)) ?? tryParseJsonLd(sanitizeJsonLdAggressive(raw));
+  if (parsed === null) return null;
   return Array.isArray(parsed) ? parsed[0] : parsed;
 }
 
-function parsePriceTiers($: ReturnType<typeof cheerio.load>): number | null {
-  const blocks: string[] = [];
-  $('small.color-blue').each((_, el) => {
-    if ($(el).text().trim() !== 'Cena') return;
-    blocks.push($(el).parent().text());
-  });
-  return minPriceFromText(blocks);
+function fallbackImageUrl($: ReturnType<typeof cheerio.load>): string | null {
+  return $('meta[property="og:image"]').attr('content') ?? null;
 }
 
-/**
- * Parses a /sk/listky/{slug}/ event page. Single-date vs. tour is decided by JSON-LD's
- * `startDate`: populated means a real single date+place; empty means a tour hub page whose
- * real per-stop data lives in the `li.list-group-item` list instead.
- */
-export function parseEventDetail(html: string): ParsedEventDetail {
-  const $ = cheerio.load(html);
-  const jsonLd = readJsonLd($);
-
-  if (jsonLd.startDate) {
-    const { venue } = splitAddress(decodeHtmlEntities(jsonLd.location.name));
-    return {
-      kind: 'single',
-      title: decodeHtmlEntities(jsonLd.name),
-      startsAt: parseIsoLikeDateTime(jsonLd.startDate),
-      venue,
-      city: decodeHtmlEntities(jsonLd.location.address),
-      imageUrl: jsonLd.image || null,
-      priceFrom: parsePriceTiers($),
-    };
-  }
-
+function parseTourStopsFromDom($: ReturnType<typeof cheerio.load>): ParsedTourStop[] {
   const stops: ParsedTourStop[] = [];
   $('li.list-group-item > a[href^="/sk/listky/"]').each((_, el) => {
     const $stop = $(el);
@@ -155,6 +194,69 @@ export function parseEventDetail(html: string): ParsedEventDetail {
       href: new URL(href, PREDPREDAJ_BASE_URL).toString(),
     });
   });
+  return stops;
+}
 
-  return { kind: 'tour', stops, imageUrl: jsonLd.image || null };
+/** Last-resort single-date parser straight off the visible page, used when JSON-LD is unrecoverable. */
+function parseSingleDateFromDom(
+  $: ReturnType<typeof cheerio.load>,
+): { title: string; startsAt: Date; venue: string; city: string } | null {
+  const title = decodeHtmlEntities($('h1').first().text().trim());
+  const infoText = $('p.mb-4').first().text().trim();
+  const m = infoText.match(/^(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2})\s*(.+)$/s);
+  if (!title || !m) return null;
+  const { venue, cityRaw } = splitAddress(m[2].trim());
+  return { title, startsAt: parseSlovakDateTime(m[1]), venue, city: stripPostalCode(cityRaw) };
+}
+
+function parsePriceTiers($: ReturnType<typeof cheerio.load>): number | null {
+  const blocks: string[] = [];
+  $('small.color-blue').each((_, el) => {
+    if ($(el).text().trim() !== 'Cena') return;
+    blocks.push($(el).parent().text());
+  });
+  return minPriceFromText(blocks);
+}
+
+/**
+ * Parses a /sk/listky/{slug}/ event page. Single-date vs. tour is decided by JSON-LD's
+ * `startDate`: populated means a real single date+place; empty means a tour hub page whose real
+ * per-stop data lives in the `li.list-group-item` list instead.
+ *
+ * predpredaj's own JSON-LD is sometimes invalid (a stray raw control character, or — observed live —
+ * an unescaped quote inside a description). `readJsonLd` already retries with two escalating repairs;
+ * if both fail (or there is no JSON-LD block at all), this falls all the way back to parsing the
+ * visible page: tour stops never needed JSON-LD to begin with, and a single-date page without usable
+ * JSON-LD still has its title/date/venue rendered in `h1`/`p.mb-4`, just without the free city split
+ * JSON-LD's `location.address` gives — `parseSingleDateFromDom` recovers it with the same
+ * postal-code-stripping the tour-stop path already uses.
+ */
+export function parseEventDetail(html: string): ParsedEventDetail {
+  const $ = cheerio.load(html);
+  const jsonLd = readJsonLd($);
+
+  if (jsonLd?.startDate) {
+    const { venue } = splitAddress(decodeHtmlEntities(jsonLd.location.name));
+    return {
+      kind: 'single',
+      title: decodeHtmlEntities(jsonLd.name),
+      startsAt: parseIsoLikeDateTime(jsonLd.startDate),
+      venue,
+      city: decodeHtmlEntities(jsonLd.location.address),
+      imageUrl: jsonLd.image || null,
+      priceFrom: parsePriceTiers($),
+    };
+  }
+
+  const stops = parseTourStopsFromDom($);
+  if (stops.length > 0) {
+    return { kind: 'tour', stops, imageUrl: jsonLd?.image || fallbackImageUrl($) };
+  }
+
+  const domSingle = parseSingleDateFromDom($);
+  if (domSingle) {
+    return { kind: 'single', ...domSingle, imageUrl: jsonLd?.image || fallbackImageUrl($), priceFrom: parsePriceTiers($) };
+  }
+
+  throw new Error('unrecognized event page shape (no usable JSON-LD, no tour stops, no single-date markup)');
 }
