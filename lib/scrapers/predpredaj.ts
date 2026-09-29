@@ -97,7 +97,16 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
         continue; // one bad item never aborts the crawl
       }
 
-      const detail = parseEventDetail(detailHtml);
+      let detail: ReturnType<typeof parseEventDetail>;
+      try {
+        detail = parseEventDetail(detailHtml);
+      } catch (e) {
+        // Real predpredaj pages sometimes embed invalid JSON-LD (e.g. an unescaped quote inside a
+        // description) that no amount of sanitizing can safely recover. One bad item never aborts the crawl.
+        console.warn(`[predpredaj] skipping ${card.href}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+
       if (detail.kind === 'single') {
         raws.push(toRawEvent(category, card.href, detail));
       } else {
