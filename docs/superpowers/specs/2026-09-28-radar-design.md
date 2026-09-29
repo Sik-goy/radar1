@@ -347,6 +347,16 @@ Ingest DB flow is verified by running the seed against the Neon dev branch and i
     page with no tiers rendered (not yet on sale) means unknown price
     (`null`), not a crawl failure.
   - Currency is always EUR (Slovakia).
+  - **`RawEvent.country` must be set explicitly to `'SK'`** on every event
+    this scraper emits. `normalizeCity` only recognizes 8 major Slovak
+    cities (`lib/normalize/city.ts`'s `CITIES` table); predpredaj covers
+    many smaller towns (`Bardejov`, `Senec`, `Piešťany`, `Nové Zámky`, …)
+    that fall through to a title-cased pass-through with no known
+    country, and `normalizeRaw` throws `unknown country for city "X"`
+    when neither the city table nor `raw.country` supplies one. Every
+    other predpredaj-sourced field (venue, city casing) already comes
+    pre-formatted from JSON-LD/the page, so this is the one field the
+    scraper must not leave to inference.
   - Images: hotlink predpredaj's own image URL directly (JSON-LD `image`
     field, see above), matching plan 1's "plain `<img>` until scrapers
     reveal hosts for `next/image` `remotePatterns`" — do not rehost.
@@ -354,34 +364,32 @@ Ingest DB flow is verified by running the seed against the Neon dev branch and i
     ignored) — deep-link to predpredaj's own page for anyone who wants
     one, per the same "why redistribute what we can link to" reasoning as
     the outreach email.
-- **Category → genre** — the crawled category (the 7-value nav list, see
-  above; there is no reliable finer per-event signal) maps directly:
+- **Category → genre**: the crawled category (the 7-value nav list, see
+  above; there is no reliable finer per-event signal) is passed straight
+  through as `RawEvent.rawGenre` using its Slovak display name (`Koncert`,
+  `Šport`, `Divadlo`, `Festival`, `Show`, `Pre deti`, `Ostatné`) and goes
+  through the **existing** `normalizeGenre` keyword table exactly like
+  every other source — no bypass, no separate mapping table. Checked each
+  of the 7 against the real keyword rules in `lib/normalize/genre.ts`, in
+  their matching order, so this is a verified fact, not an assumption:
 
-  | predpredaj category | Genre |
-  |---|---|
-  | Koncert | `concert` |
-  | Šport | `sport` |
-  | Divadlo | `theatre` |
-  | Festival | `concert`, multi-day (`endsAt` set) when the page shows a
-    date range instead of one date |
-  | Show | `other` (talk shows, galas — not clearly standup; a `standup`
-    match only fires on an explicit "stand-up"/"comedy" keyword hit via
-    the existing `normalizeGenre` keyword table, which a direct category
-    mapping bypasses entirely, see below) |
-  | Pre deti | `other` |
-  | Ostatné | `other` |
+  | predpredaj category | matches via | → Genre |
+  |---|---|---|
+  | `Koncert` | `concert` rule's `koncert` keyword | `concert` |
+  | `Šport` | `sport` rule's `sport` keyword | `sport` |
+  | `Divadlo` | `theatre` rule's `divadl` keyword | `theatre` |
+  | `Festival` | `concert` rule's `festival` keyword | `concert` |
+  | `Show` | no rule matches | `other` (fallback) |
+  | `Pre deti` | no rule matches | `other` (fallback) |
+  | `Ostatné` | no rule matches | `other` (fallback) |
 
-  There is no `exhibition`-shaped category among the 7 (`Kultúra`, which
-  would fit best, is only ever a filter-widget option, never a crawlable
-  `/sk/kategoria/` page or a real per-event value) — predpredaj simply
-  doesn't surface exhibitions as a first-class category the way GoOut's
-  mock data did. Not a gap to work around; there is nothing to map.
-
-  Map directly in the scraper adapter (`lib/scrapers/predpredaj.ts`) to a
-  `Genre`, bypassing `normalizeGenre`'s keyword matching — predpredaj's
-  categories are a small fixed enum, not free text, so a direct lookup is
-  more precise (the same call was proposed for goout's category enum in
-  the Task 5/6 self-review, never implemented since goout is on hold).
+  `Festival` events are multi-day (`endsAt` set) when the page shows a
+  date range instead of one date. There is no `exhibition`-shaped category
+  among the 7 (`Kultúra`, which would fit best, is only ever a
+  filter-widget option, never a crawlable `/sk/kategoria/` page or a real
+  per-event value) — predpredaj simply doesn't surface exhibitions as a
+  first-class category the way GoOut's mock data did. Not a gap to work
+  around; there is nothing to map.
 
 ### Ingest and cron
 
