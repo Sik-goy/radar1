@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a working `predpredaj.zoznam.sk` scraper (`lib/scrapers/predpredaj.ts`) feeding the existing `upsertRawEvents` pipeline, a `/api/cron/scrape` route with bearer auth and per-category chunking, a `vercel.json` cron schedule, and a live smoke run against the Neon dev branch that reports real dedupe behavior.
+**Goal:** Ship a working `predpredaj.zoznam.sk` scraper (`lib/scrapers/predpredaj.ts`) feeding the existing `upsertRawEvents` pipeline, a CLI entry point (`scripts/scrape.ts`) driven by a GitHub Actions workflow on a schedule, a thin `CRON_SECRET`-protected `/api/cron/scrape` route for manual triggering, and a live smoke run against the Neon dev branch that reports real dedupe behavior.
 
-**Architecture:** Three pure/testable layers under `lib/scrapers/predpredaj/`: string parsing (`text.ts`, no DOM), DOM/JSON-LD parsing against saved fixtures (`parse.ts`, no network), then a thin network-and-delay orchestration layer (`lib/scrapers/predpredaj.ts`) that assembles `RawEvent[]`. The cron route (`app/api/cron/scrape/route.ts`) is a thin wrapper: auth check, call the scraper for one category, call `upsertRawEvents`, update `Source.lastScrapedAt`. `vercel.json` fans the six-hourly tick out to one call per category so no single invocation risks a serverless timeout.
+**Architecture:** Three pure/testable layers under `lib/scrapers/predpredaj/`: string parsing (`text.ts`, no DOM), DOM/JSON-LD parsing against saved fixtures (`parse.ts`, no network), then a thin network-and-delay orchestration layer (`lib/scrapers/predpredaj.ts`) that assembles `RawEvent[]`. A shared `lib/scrapers/run-scrape.ts` wraps scrape + ingest + `Source` bookkeeping so the CLI, the API route, and later scrapers all call the exact same function. `.github/workflows/scrape.yml` runs the CLI on a schedule and via manual dispatch — no per-category chunking or serverless timeout to design around, since Actions gives the whole run up to 30 minutes.
 
 **Tech Stack:** Same as plan 1 (Next.js 15, TypeScript strict, Prisma, Vitest) plus `cheerio` for HTML parsing (already the spec's chosen library, not previously installed) and `@date-fns/tz`'s `TZDate` (already a dependency) for Prague-time date construction.
 
@@ -19,8 +19,10 @@
 - Descriptions are never scraped. Images are hotlinked (predpredaj's own URL), never rehosted.
 - Genre: the crawled category's Slovak display name (`Koncert`, `Šport`, `Divadlo`, `Festival`, `Show`, `Pre deti`, `Ostatné`) is passed straight through as `RawEvent.rawGenre` — verified against the real keyword rules in `lib/normalize/genre.ts` to already resolve correctly (`Koncert`/`Festival` → `concert`, `Šport` → `sport`, `Divadlo` → `theatre`, the rest → `other`). No separate mapping table, no bypass of `normalizeGenre`.
 - Tour-stop events (see below) always get `priceFrom: null` — price tiers only render on single-date pages, never on a tour's hub page.
-- `/api/cron/scrape` requires `Authorization: Bearer $CRON_SECRET` and a required `?category=` query param, one of the 7 category slugs (`koncert`, `sport`, `show`, `divadlo`, `festival`, `pre-deti`, `ostatne`) — there is no whole-site mode. An optional `?maxEvents=` overrides the per-run cap.
-- Cron chunking: `vercel.json` defines seven cron entries, one per category, at `0,8,16,24,32,40,48 */6 * * *` minute offsets (koncert=0, sport=8, show=16, divadlo=24, festival=32, pre-deti=40, ostatne=48) so they never overlap. Default cap is `PREDPREDAJ_MAX_EVENTS_PER_CATEGORY` (env var, default 30) detail-page fetches per run.
+- The scheduled run is **GitHub Actions, not Vercel cron**: `.github/workflows/scrape.yml` on `schedule: '17 */6 * * *'` plus `workflow_dispatch` for a manual button, Node 20, `npm ci`, `npx prisma generate`, then `npm run scrape -- --source predpredaj`. `timeout-minutes: 30` and a `concurrency` group (`cancel-in-progress: false`) so an overlapping run queues instead of racing the one before it. Secrets `DATABASE_URL` and `DIRECT_URL` — same names as `.env` — are added in the repo's GitHub settings, never committed.
+- No per-category chunking: one run walks all 7 categories sequentially with the same delay and `robots.txt` checks as always. GitHub Actions' 30-minute budget comfortably covers a full crawl (even ~560 detail-page fetches at 1.5s delay is ~14 minutes) — there is no serverless timeout to chunk around here.
+- `scripts/scrape.ts` is the CLI entry point (`npm run scrape -- --source predpredaj [--category X] [--max-pages N]`): runs the scraper, ingests, updates `Source.lastScrapedAt`, prints the resulting counts, and exits non-zero on any thrown error (so a GitHub Actions run shows red on failure). `--category` and `--max-pages` are optional narrowing flags mainly for manual/smoke runs; a bare `--source predpredaj` run covers everything.
+- `/api/cron/scrape` stays as a thin, `CRON_SECRET`-protected wrapper around the exact same shared function (`runScrape`), kept for manual triggering later — `?category=` is now optional (omit it to run every category, matching the CLI's default), `?maxEvents=` still overrides the cap.
 - Commits: conventional-commit subject, ending with the trailer `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`.
 - Browsing the live site (if ever needed beyond the saved fixtures) is done with the `/browse` skill only.
 
@@ -32,7 +34,7 @@ Inputs the spec implies but does not spell out for every task's tests. Each has 
 2. Tour-page vs. single-date-page detection must key off the JSON-LD `startDate` being empty, not off `li.list-group-item` merely being present on the page — that class name is reused elsewhere (a single-date page fixture has 14 unrelated `li.list-group-item` elements, zero of them tour stops). (Task 2)
 3. JSON-LD string values on this site are themselves HTML-entity-escaped (`"Diana Damrau \&amp; ..."` literally, not a real `&`) — every JSON-LD string needs decoding, or titles/venues render with literal escape sequences. (Task 1, consumed by Task 2)
 4. A `robots.txt`-disallowed URL must be skipped before its detail page is ever fetched, not filtered out of the result afterward — this is a network-courtesy requirement, not just a data-correctness one. (Task 3)
-5. `maxEventsPerCategory` must cap the number of *detail-page fetches actually made*, not just the length of the returned array — the cap exists specifically to bound cron runtime, and a bug that still fetches everything but truncates the output defeats its purpose. (Task 3)
+5. `maxEventsPerCategory` (the CLI's `--max-pages`) must cap the number of *detail-page fetches actually made*, not just the length of the returned array — it exists to bound scope for a smoke test or a manual partial run, and a bug that still fetches everything but truncates the output defeats its purpose. (Task 3)
 
 ---
 
@@ -43,9 +45,11 @@ lib/scrapers/predpredaj/text.ts        pure string/date/price parsing, no DOM
 lib/scrapers/predpredaj/parse.ts       cheerio + JSON-LD parsing (category listing, event detail)
 lib/scrapers/predpredaj.ts             network orchestration: scrapePredpredaj()
 lib/scrapers/__fixtures__/             3 real saved pages (already committed)
-app/api/cron/scrape/route.ts           bearer-auth cron endpoint
-vercel.json                            7 staggered cron entries
-scripts/smoke-predpredaj.ts            live smoke-test script (not part of `npm test`)
+lib/scrapers/run-scrape.ts             shared scrape+ingest+Source bookkeeping, used by the CLI and the route
+scripts/scrape.ts                      CLI entry point (`npm run scrape`), what the GitHub Actions workflow calls
+scripts/smoke-predpredaj.ts            report-only script for the live-run dedupe check (not part of `npm test`)
+app/api/cron/scrape/route.ts           thin CRON_SECRET-protected wrapper around runScrape, for manual triggering
+.github/workflows/scrape.yml           scheduled + manual GitHub Actions run
 ```
 
 Tests sit next to the code as `*.test.ts`, except the route test at `app/api/cron/scrape/route.test.ts`.
@@ -682,6 +686,24 @@ describe('scrapePredpredaj', () => {
     expect(raws).toHaveLength(2);
     expect(fetchImpl).not.toHaveBeenCalledWith(`${PREDPREDAJ_BASE_URL}/sk/listky/c/`, expect.anything());
   });
+
+  it('does not cap detail-page fetches when maxEventsPerCategory is not given', async () => {
+    const fetchImpl = fetchImplFrom({
+      [ROBOTS_URL]: ROBOTS_TXT,
+      [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([
+        { title: 'A', slug: 'a' },
+        { title: 'B', slug: 'b' },
+        { title: 'C', slug: 'c' },
+      ]),
+      [`${PREDPREDAJ_BASE_URL}/sk/listky/a/`]: singleDetailHtml('A', '2026-12-01 20:00', 'Nitra'),
+      [`${PREDPREDAJ_BASE_URL}/sk/listky/b/`]: singleDetailHtml('B', '2026-12-01 20:00', 'Nitra'),
+      [`${PREDPREDAJ_BASE_URL}/sk/listky/c/`]: singleDetailHtml('C', '2026-12-01 20:00', 'Nitra'),
+    });
+
+    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+
+    expect(raws).toHaveLength(3);
+  });
 });
 ```
 
@@ -706,7 +728,6 @@ import type { RawEvent } from '@/lib/types';
 
 const USER_AGENT = 'RadarBot/0.1 (+https://github.com/Sik-goy/radar1; contact: matejn2012@gmail.com)';
 const DEFAULT_DELAY_MS = 1500;
-const DEFAULT_MAX_EVENTS_PER_CATEGORY = Number(process.env.PREDPREDAJ_MAX_EVENTS_PER_CATEGORY) || 30;
 
 export interface ScrapePredpredajOptions {
   categories?: PredpredajCategory[];
@@ -771,7 +792,6 @@ function toRawEvent(
 /** Scrapes predpredaj.zoznam.sk: one or more categories, sequentially, with a delay before every request. */
 export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): Promise<RawEvent[]> {
   const categories = options.categories ?? [...PREDPREDAJ_CATEGORIES];
-  const maxEventsPerCategory = options.maxEventsPerCategory ?? DEFAULT_MAX_EVENTS_PER_CATEGORY;
   const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
   const fetchImpl = options.fetchImpl ?? fetch;
 
@@ -781,9 +801,10 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
   for (const category of categories) {
     await wait(delayMs);
     const listingHtml = await fetchText(`${PREDPREDAJ_BASE_URL}/sk/kategoria/${category}/`, fetchImpl);
-    const cards = parseCategoryListing(listingHtml)
-      .filter((card) => !isDisallowed(card.href, disallowed))
-      .slice(0, maxEventsPerCategory);
+    const allowed = parseCategoryListing(listingHtml).filter((card) => !isDisallowed(card.href, disallowed));
+    // undefined means "no cap" — a full run has no serverless timeout to bound itself against;
+    // the cap exists only for smoke tests and manual partial runs (CLI's --max-pages).
+    const cards = options.maxEventsPerCategory === undefined ? allowed : allowed.slice(0, options.maxEventsPerCategory);
 
     for (const card of cards) {
       await wait(delayMs);
@@ -828,15 +849,197 @@ git commit -m "feat: add predpredaj scrape orchestration (delay, robots.txt, cap
 
 ---
 
-### Task 4: Cron route, vercel.json, env and seed wiring
+### Task 4: Shared run-scrape module and CLI entry point
 
 **Files:**
-- Create: `app/api/cron/scrape/route.ts`, `vercel.json`
+- Create: `lib/scrapers/run-scrape.ts`, `scripts/scrape.ts`
+- Modify: `package.json` (add a `scrape` script)
+- Test: `lib/scrapers/run-scrape.test.ts`
+
+**Interfaces:**
+- Consumes: `scrapePredpredaj` from `@/lib/scrapers/predpredaj`; `upsertRawEvents`, `type IngestStats` from `@/lib/ingest`; `prisma` from `@/lib/db`; `PREDPREDAJ_CATEGORIES`, `type PredpredajCategory` from `@/lib/scrapers/predpredaj/parse`.
+- Produces: `SOURCES`, `type ScraperSource`, `interface RunScrapeOptions { source: ScraperSource; categories?: PredpredajCategory[]; maxEventsPerCategory?: number }`, `runScrape(options: RunScrapeOptions): Promise<IngestStats>`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`lib/scrapers/run-scrape.test.ts`:
+```ts
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { scrapePredpredaj, upsertRawEvents, sourceUpsert, sourceUpdate } = vi.hoisted(() => ({
+  scrapePredpredaj: vi.fn(),
+  upsertRawEvents: vi.fn(),
+  sourceUpsert: vi.fn(),
+  sourceUpdate: vi.fn(),
+}));
+
+vi.mock('@/lib/scrapers/predpredaj', () => ({ scrapePredpredaj }));
+vi.mock('@/lib/ingest', () => ({ upsertRawEvents }));
+vi.mock('@/lib/db', () => ({ prisma: { source: { upsert: sourceUpsert, update: sourceUpdate } } }));
+
+import { runScrape } from '@/lib/scrapers/run-scrape';
+
+beforeEach(() => {
+  scrapePredpredaj.mockReset().mockResolvedValue([{ source: 'predpredaj' }]);
+  upsertRawEvents.mockReset().mockResolvedValue({ created: 1, updated: 0, merged: 0, skipped: [] });
+  sourceUpsert.mockReset().mockResolvedValue({});
+  sourceUpdate.mockReset().mockResolvedValue({});
+});
+
+describe('runScrape', () => {
+  it('ensures the Source row exists before scraping', async () => {
+    await runScrape({ source: 'predpredaj' });
+    expect(sourceUpsert).toHaveBeenCalledWith({
+      where: { slug: 'predpredaj' },
+      update: {},
+      create: { slug: 'predpredaj', name: 'Predpredaj', baseUrl: 'https://predpredaj.zoznam.sk' },
+    });
+  });
+
+  it('scrapes with the given options, ingests, updates lastScrapedAt, and returns the ingest stats', async () => {
+    const stats = await runScrape({ source: 'predpredaj', categories: ['koncert'], maxEventsPerCategory: 5 });
+    expect(scrapePredpredaj).toHaveBeenCalledWith({ categories: ['koncert'], maxEventsPerCategory: 5 });
+    expect(upsertRawEvents).toHaveBeenCalledWith([{ source: 'predpredaj' }]);
+    expect(sourceUpdate).toHaveBeenCalledWith({ where: { slug: 'predpredaj' }, data: { lastScrapedAt: expect.any(Date) } });
+    expect(stats).toEqual({ created: 1, updated: 0, merged: 0, skipped: [] });
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `npx vitest run lib/scrapers/run-scrape.test.ts`
+Expected: FAIL, cannot resolve `@/lib/scrapers/run-scrape`.
+
+- [ ] **Step 3: Implement `lib/scrapers/run-scrape.ts`**
+
+```ts
+import { prisma } from '@/lib/db';
+import { upsertRawEvents, type IngestStats } from '@/lib/ingest';
+import { scrapePredpredaj } from '@/lib/scrapers/predpredaj';
+import type { PredpredajCategory } from '@/lib/scrapers/predpredaj/parse';
+
+export const SOURCES = ['predpredaj'] as const;
+export type ScraperSource = (typeof SOURCES)[number];
+
+const SOURCE_INFO: Record<ScraperSource, { name: string; baseUrl: string }> = {
+  predpredaj: { name: 'Predpredaj', baseUrl: 'https://predpredaj.zoznam.sk' },
+};
+
+export interface RunScrapeOptions {
+  source: ScraperSource;
+  categories?: PredpredajCategory[];
+  maxEventsPerCategory?: number;
+}
+
+/** Scrapes one source end to end: ensures its Source row exists, scrapes, ingests, stamps lastScrapedAt. */
+export async function runScrape(options: RunScrapeOptions): Promise<IngestStats> {
+  await prisma.source.upsert({
+    where: { slug: options.source },
+    update: {},
+    create: { slug: options.source, ...SOURCE_INFO[options.source] },
+  });
+
+  const raws = await scrapePredpredaj({ categories: options.categories, maxEventsPerCategory: options.maxEventsPerCategory });
+  const stats = await upsertRawEvents(raws);
+  await prisma.source.update({ where: { slug: options.source }, data: { lastScrapedAt: new Date() } });
+  return stats;
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `npx vitest run lib/scrapers/run-scrape.test.ts`
+Expected: PASS (all tests).
+
+- [ ] **Step 5: Write the CLI, `scripts/scrape.ts`**
+
+```ts
+import 'dotenv/config';
+import { prisma } from '@/lib/db';
+import { PREDPREDAJ_CATEGORIES, type PredpredajCategory } from '@/lib/scrapers/predpredaj/parse';
+import { runScrape, SOURCES, type ScraperSource } from '@/lib/scrapers/run-scrape';
+
+function flagValue(argv: string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  return i === -1 ? undefined : argv[i + 1];
+}
+
+function parseArgs(argv: string[]): { source: ScraperSource; category?: PredpredajCategory; maxPages?: number } {
+  const source = flagValue(argv, '--source');
+  if (!source || !(SOURCES as readonly string[]).includes(source)) {
+    throw new Error(`--source is required, one of: ${SOURCES.join(', ')}`);
+  }
+  const category = flagValue(argv, '--category');
+  if (category !== undefined && !(PREDPREDAJ_CATEGORIES as readonly string[]).includes(category)) {
+    throw new Error(`--category must be one of: ${PREDPREDAJ_CATEGORIES.join(', ')}`);
+  }
+  const maxPagesRaw = flagValue(argv, '--max-pages');
+  const maxPages = maxPagesRaw !== undefined ? Number(maxPagesRaw) : undefined;
+  return { source: source as ScraperSource, category: category as PredpredajCategory | undefined, maxPages };
+}
+
+async function main() {
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set (see .env.example)');
+  const { source, category, maxPages } = parseArgs(process.argv.slice(2));
+
+  console.log(
+    `Scraping ${source}` +
+      (category ? ` (category=${category})` : ' (all categories)') +
+      (maxPages !== undefined ? ` maxPages=${maxPages}` : ''),
+  );
+
+  const stats = await runScrape({
+    source,
+    categories: category ? [category] : undefined,
+    maxEventsPerCategory: maxPages,
+  });
+
+  console.log('Ingest stats:', stats);
+  if (stats.skipped.length > 0) {
+    console.log(`${stats.skipped.length} item(s) skipped:`);
+    for (const s of stats.skipped) console.log(`  - ${s.url}: ${s.reason}`);
+  }
+}
+
+main()
+  .then(() => prisma.$disconnect())
+  .catch(async (e) => {
+    console.error(e);
+    await prisma.$disconnect();
+    process.exitCode = 1;
+  });
+```
+
+- [ ] **Step 6: Add the `scrape` npm script**
+
+```bash
+npm pkg set scripts.scrape="tsx scripts/scrape.ts"
+```
+
+- [ ] **Step 7: Typecheck**
+
+Run: `npm run typecheck`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add lib/scrapers/run-scrape.ts lib/scrapers/run-scrape.test.ts scripts/scrape.ts package.json
+git commit -m "feat: add shared run-scrape module and scrape CLI"
+```
+
+---
+
+### Task 5: Thin cron route and GitHub Actions workflow
+
+**Files:**
+- Create: `app/api/cron/scrape/route.ts`, `.github/workflows/scrape.yml`
 - Modify: `.env.example`, `README.md`, `prisma/seed.ts` (predpredaj `baseUrl` — it redirects to `predpredaj.zoznam.sk`, point the record at the real domain)
 - Test: `app/api/cron/scrape/route.test.ts`
 
 **Interfaces:**
-- Consumes: `PREDPREDAJ_CATEGORIES`, `type PredpredajCategory` from `@/lib/scrapers/predpredaj/parse`; `scrapePredpredaj` from `@/lib/scrapers/predpredaj`; `upsertRawEvents` from `@/lib/ingest`; `prisma` from `@/lib/db`.
+- Consumes: `PREDPREDAJ_CATEGORIES`, `type PredpredajCategory` from `@/lib/scrapers/predpredaj/parse`; `runScrape` from `@/lib/scrapers/run-scrape`.
 - Produces: `GET` handler at `app/api/cron/scrape/route.ts`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -846,15 +1049,8 @@ git commit -m "feat: add predpredaj scrape orchestration (delay, robots.txt, cap
 import { NextRequest } from 'next/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { scrapePredpredaj, upsertRawEvents, sourceUpdate } = vi.hoisted(() => ({
-  scrapePredpredaj: vi.fn(),
-  upsertRawEvents: vi.fn(),
-  sourceUpdate: vi.fn(),
-}));
-
-vi.mock('@/lib/scrapers/predpredaj', () => ({ scrapePredpredaj }));
-vi.mock('@/lib/ingest', () => ({ upsertRawEvents }));
-vi.mock('@/lib/db', () => ({ prisma: { source: { update: sourceUpdate } } }));
+const { runScrape } = vi.hoisted(() => ({ runScrape: vi.fn() }));
+vi.mock('@/lib/scrapers/run-scrape', () => ({ runScrape }));
 
 import { GET } from '@/app/api/cron/scrape/route';
 
@@ -863,39 +1059,32 @@ const request = (path: string, headers: Record<string, string> = {}) =>
 
 beforeEach(() => {
   process.env.CRON_SECRET = 'test-secret';
-  scrapePredpredaj.mockReset().mockResolvedValue([]);
-  upsertRawEvents.mockReset().mockResolvedValue({ created: 1, updated: 0, merged: 0, skipped: [] });
-  sourceUpdate.mockReset().mockResolvedValue({});
+  runScrape.mockReset().mockResolvedValue({ created: 1, updated: 0, merged: 0, skipped: [] });
 });
 
 describe('GET /api/cron/scrape', () => {
   it('rejects a request without the right bearer token', async () => {
-    const res = await GET(request('/api/cron/scrape?category=koncert', { authorization: 'Bearer wrong' }));
+    const res = await GET(request('/api/cron/scrape', { authorization: 'Bearer wrong' }));
     expect(res.status).toBe(401);
-    expect(scrapePredpredaj).not.toHaveBeenCalled();
+    expect(runScrape).not.toHaveBeenCalled();
   });
 
-  it('rejects a request with a missing or invalid category', async () => {
-    const missing = await GET(request('/api/cron/scrape', { authorization: 'Bearer test-secret' }));
-    expect(missing.status).toBe(400);
-
-    const invalid = await GET(request('/api/cron/scrape?category=bogus', { authorization: 'Bearer test-secret' }));
-    expect(invalid.status).toBe(400);
-    expect(scrapePredpredaj).not.toHaveBeenCalled();
+  it('rejects an invalid category', async () => {
+    const res = await GET(request('/api/cron/scrape?category=bogus', { authorization: 'Bearer test-secret' }));
+    expect(res.status).toBe(400);
+    expect(runScrape).not.toHaveBeenCalled();
   });
 
-  it('scrapes the given category, ingests, updates lastScrapedAt, and returns the stats', async () => {
-    const res = await GET(request('/api/cron/scrape?category=koncert', { authorization: 'Bearer test-secret' }));
+  it('runs every category when none is given, and returns the stats', async () => {
+    const res = await GET(request('/api/cron/scrape', { authorization: 'Bearer test-secret' }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ created: 1, updated: 0, merged: 0, skipped: [] });
-    expect(scrapePredpredaj).toHaveBeenCalledWith({ categories: ['koncert'], maxEventsPerCategory: undefined });
-    expect(upsertRawEvents).toHaveBeenCalledWith([]);
-    expect(sourceUpdate).toHaveBeenCalledWith({ where: { slug: 'predpredaj' }, data: { lastScrapedAt: expect.any(Date) } });
+    expect(runScrape).toHaveBeenCalledWith({ source: 'predpredaj', categories: undefined, maxEventsPerCategory: undefined });
   });
 
-  it('passes an explicit maxEvents override through to the scraper', async () => {
+  it('runs just the given category with an explicit maxEvents override', async () => {
     await GET(request('/api/cron/scrape?category=sport&maxEvents=5', { authorization: 'Bearer test-secret' }));
-    expect(scrapePredpredaj).toHaveBeenCalledWith({ categories: ['sport'], maxEventsPerCategory: 5 });
+    expect(runScrape).toHaveBeenCalledWith({ source: 'predpredaj', categories: ['sport'], maxEventsPerCategory: 5 });
   });
 });
 ```
@@ -910,10 +1099,8 @@ Expected: FAIL, cannot resolve `@/app/api/cron/scrape/route`.
 `app/api/cron/scrape/route.ts`:
 ```ts
 import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/db';
-import { upsertRawEvents } from '@/lib/ingest';
-import { scrapePredpredaj } from '@/lib/scrapers/predpredaj';
 import { PREDPREDAJ_CATEGORIES, type PredpredajCategory } from '@/lib/scrapers/predpredaj/parse';
+import { runScrape } from '@/lib/scrapers/run-scrape';
 
 export const maxDuration = 60;
 
@@ -929,10 +1116,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
 
-  const category = request.nextUrl.searchParams.get('category');
-  if (!isPredpredajCategory(category)) {
+  const categoryParam = request.nextUrl.searchParams.get('category');
+  if (categoryParam !== null && !isPredpredajCategory(categoryParam)) {
     return NextResponse.json(
-      { error: `category query param is required, one of: ${PREDPREDAJ_CATEGORIES.join(', ')}` },
+      { error: `category, if given, must be one of: ${PREDPREDAJ_CATEGORIES.join(', ')}` },
       { status: 400 },
     );
   }
@@ -940,9 +1127,11 @@ export async function GET(request: NextRequest) {
   const maxEventsParam = request.nextUrl.searchParams.get('maxEvents');
   const maxEventsPerCategory = maxEventsParam ? Number(maxEventsParam) : undefined;
 
-  const raws = await scrapePredpredaj({ categories: [category], maxEventsPerCategory });
-  const stats = await upsertRawEvents(raws);
-  await prisma.source.update({ where: { slug: 'predpredaj' }, data: { lastScrapedAt: new Date() } });
+  const stats = await runScrape({
+    source: 'predpredaj',
+    categories: categoryParam ? [categoryParam] : undefined,
+    maxEventsPerCategory,
+  });
 
   return NextResponse.json(stats);
 }
@@ -953,23 +1142,38 @@ export async function GET(request: NextRequest) {
 Run: `npx vitest run app/api/cron/scrape/route.test.ts`
 Expected: PASS (all tests).
 
-- [ ] **Step 5: Write `vercel.json`**
+- [ ] **Step 5: Write `.github/workflows/scrape.yml`**
 
-```json
-{
-  "crons": [
-    { "path": "/api/cron/scrape?category=koncert", "schedule": "0 */6 * * *" },
-    { "path": "/api/cron/scrape?category=sport", "schedule": "8 */6 * * *" },
-    { "path": "/api/cron/scrape?category=show", "schedule": "16 */6 * * *" },
-    { "path": "/api/cron/scrape?category=divadlo", "schedule": "24 */6 * * *" },
-    { "path": "/api/cron/scrape?category=festival", "schedule": "32 */6 * * *" },
-    { "path": "/api/cron/scrape?category=pre-deti", "schedule": "40 */6 * * *" },
-    { "path": "/api/cron/scrape?category=ostatne", "schedule": "48 */6 * * *" }
-  ]
-}
+```yaml
+name: Scrape events
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run scrape -- --source predpredaj
 ```
 
-Note for whoever deploys this: Vercel's Hobby tier has historically capped the number of cron jobs and how often they can run (as low as one per day on some past tiers). Confirm the deployed plan actually supports seven six-hourly crons before relying on this; if it doesn't, the fallback is a single cron entry that calls the route once per category itself (a small loop inside the handler, or a `?category=` rotation driven by a stored cursor) — not implemented here since it depends on a plan tier this repo doesn't have visibility into.
+Add the two secrets in the repo's GitHub settings (Settings → Secrets and variables → Actions → New repository secret) named exactly `DATABASE_URL` and `DIRECT_URL` — same names and same values as the local `.env` (the pooled and direct Neon connection strings). Point them at whichever Neon branch should receive scraped data; the dev branch is the reasonable choice while this is still pre-production.
 
 - [ ] **Step 6: Update `.env.example` and `README.md`**
 
@@ -977,19 +1181,19 @@ Add to `.env.example`:
 ```
 # Bearer token /api/cron/scrape requires. Generate any long random string.
 CRON_SECRET="change-me"
-
-# Optional: caps detail-page fetches per predpredaj category per cron run (default 30).
-PREDPREDAJ_MAX_EVENTS_PER_CATEGORY=30
 ```
 
 Add to `README.md`, after the existing "Scripts" section:
 ```markdown
 ## Scraping
 
-`GET /api/cron/scrape?category=<koncert|sport|show|divadlo|festival|pre-deti|ostatne>` with
-`Authorization: Bearer $CRON_SECRET` scrapes predpredaj.zoznam.sk for that one category and
-ingests the result. `vercel.json` schedules all seven categories every 6 hours, staggered by
-a few minutes each so they never run concurrently.
+`npm run scrape -- --source predpredaj [--category <koncert|sport|show|divadlo|festival|pre-deti|ostatne>] [--max-pages N]`
+scrapes predpredaj.zoznam.sk and ingests the result. `.github/workflows/scrape.yml` runs this
+on a schedule (every 6 hours) and via a manual "Run workflow" button; `DATABASE_URL` and
+`DIRECT_URL` are set as GitHub Actions secrets, not committed.
+
+`GET /api/cron/scrape` (optionally `?category=...&maxEvents=...`), with
+`Authorization: Bearer $CRON_SECRET`, runs the same thing over HTTP for manual triggering.
 ```
 
 - [ ] **Step 7: Fix the predpredaj `Source.baseUrl` in the seed**
@@ -1002,7 +1206,7 @@ to:
 ```ts
 { slug: 'predpredaj', name: 'Predpredaj', baseUrl: 'https://predpredaj.zoznam.sk' },
 ```
-(`predpredaj.sk` redirects here; point the informational field at the real domain the scraper actually talks to.)
+(`predpredaj.sk` redirects here; point the informational field at the real domain the scraper actually talks to. `runScrape`'s own `Source.upsert` — Task 4 — uses the same value, so the two never drift apart.)
 
 - [ ] **Step 8: Typecheck and build**
 
@@ -1012,20 +1216,20 @@ Expected: both succeed; the build output lists route `/api/cron/scrape`.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add app/api/cron/scrape/route.ts app/api/cron/scrape/route.test.ts vercel.json .env.example README.md prisma/seed.ts
-git commit -m "feat: add /api/cron/scrape route, vercel.json cron schedule"
+git add app/api/cron/scrape/route.ts app/api/cron/scrape/route.test.ts .github/workflows/scrape.yml .env.example README.md prisma/seed.ts
+git commit -m "feat: add thin /api/cron/scrape route and GitHub Actions schedule"
 ```
 
 ---
 
-### Task 5: Live smoke run against Neon dev
+### Task 6: Live smoke run against Neon dev
 
 **Files:**
 - Create: `scripts/smoke-predpredaj.ts`
 
 **Interfaces:**
-- Consumes: `scrapePredpredaj` from `@/lib/scrapers/predpredaj`, `upsertRawEvents` from `@/lib/ingest`, `prisma` from `@/lib/db`.
-- Produces: nothing later tasks depend on — this is a one-off script, not part of `npm test`, matching the spec's "one live smoke run reported, not in CI."
+- Consumes: `prisma` from `@/lib/db`.
+- Produces: nothing later tasks depend on — a report-only script, not part of `npm test`, matching the spec's "one live smoke run reported, not in CI." It reads what the CLI (Task 4) already scraped and ingested; it does not scrape anything itself.
 
 - [ ] **Step 1: Write the script**
 
@@ -1033,31 +1237,18 @@ git commit -m "feat: add /api/cron/scrape route, vercel.json cron schedule"
 ```ts
 import 'dotenv/config';
 import { prisma } from '@/lib/db';
-import { upsertRawEvents } from '@/lib/ingest';
-import { scrapePredpredaj } from '@/lib/scrapers/predpredaj';
-import type { PredpredajCategory } from '@/lib/scrapers/predpredaj/parse';
 
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set (see .env.example)');
-  const category = (process.argv[2] ?? 'koncert') as PredpredajCategory;
-  const maxEvents = Number(process.argv[3] ?? 8);
-
-  console.log(`Smoke run: category=${category} maxEvents=${maxEvents} against ${new URL(process.env.DATABASE_URL).host}`);
-
-  const raws = await scrapePredpredaj({ categories: [category], maxEventsPerCategory: maxEvents });
-  console.log(`Scraped ${raws.length} raw events from predpredaj.`);
-
-  const stats = await upsertRawEvents(raws);
-  console.log('Ingest stats:', stats);
+  console.log(`Reporting on predpredaj events in ${new URL(process.env.DATABASE_URL).host}`);
 
   const events = await prisma.event.findMany({
     where: { sources: { some: { source: { slug: 'predpredaj' } } } },
     include: { sources: { include: { source: true } } },
     orderBy: { createdAt: 'desc' },
-    take: raws.length + 10,
   });
 
-  console.log(`\n${events.length} predpredaj-sourced events now in the DB:`);
+  console.log(`\n${events.length} predpredaj-sourced event(s) in the DB:`);
   for (const e of events) {
     console.log(
       `- ${e.title} | ${e.venue}, ${e.city} | ${e.startsAt.toISOString()} | ` +
@@ -1089,18 +1280,26 @@ Expected: PASS.
 
 ```bash
 git add scripts/smoke-predpredaj.ts
-git commit -m "feat: add predpredaj live smoke-test script"
+git commit -m "feat: add predpredaj live smoke-test report script"
 ```
 
-- [ ] **Step 4: Run it against the Neon dev branch**
+- [ ] **Step 4: Run the real CLI against the Neon dev branch, twice, with different categories**
 
-Run: `npx tsx scripts/smoke-predpredaj.ts koncert 8`
-Expected: no crash; prints scraped/ingest counts and the resulting DB rows. This talks to the real live site and the real Neon dev database — it is the one live network call this plan makes outside of tests, matching the spec's "one live smoke run reported, not in CI." Rerun with a second, different category (e.g. `npx tsx scripts/smoke-predpredaj.ts sport 8`) to get a second, independent data point.
+Run: `npm run scrape -- --source predpredaj --category koncert --max-pages 8`
+Expected: no crash; prints scraped/ingest counts. This is the one live network call this plan makes outside of tests, matching the spec's "one live smoke run reported, not in CI" — it dogfoods the exact CLI the GitHub Actions workflow will run.
 
-- [ ] **Step 5: Report real dedupe behavior against the spec's Open Questions**
+Run: `npm run scrape -- --source predpredaj --category sport --max-pages 8`
+Expected: same, a second independent data point.
 
-Read the console output from step 4 and write up, in the final report (not a file the plan requires — this is the "report" the spec and the human partner asked for):
-- Whether any predpredaj-sourced event ended up with more than one `EventSource` (i.e., the fingerprint or fuzzy matcher fired within a single scrape — expected to be rare since each real show has exactly one predpredaj listing, but a tour with two same-day, same-venue stops, or a rerun of the smoke script itself, could trigger it).
+- [ ] **Step 5: Run the report**
+
+Run: `npx tsx scripts/smoke-predpredaj.ts`
+Expected: lists every predpredaj-sourced event now in the DB and any with more than one `EventSource`.
+
+- [ ] **Step 6: Report real dedupe behavior against the spec's Open Questions**
+
+Read the output from steps 4–5 and write up, in the final report (not a file the plan requires — this is the "report" the spec and the human partner asked for):
+- Whether any predpredaj-sourced event ended up with more than one `EventSource` (i.e., the fingerprint or fuzzy matcher fired within or across the two scrape runs — expected to be rare since each real show has exactly one predpredaj listing, but a tour with two same-day, same-venue stops could trigger it).
 - Whether any two distinct real events shared a title differing only by a trailing number or venue suffix (the spec's open question about `pickFuzzyMatch`'s number-conflict guard) — predpredaj's tour-stop titles append a *place name*, not a bare number, so this is expected not to apply directly; say so if that holds.
 - Whether the `country: 'SK'` requirement (Review Focus #1) actually got exercised — check whether any scraped city fell outside the 8-city `CITIES` table (e.g. a smaller town) and confirm it ingested without throwing.
 
@@ -1108,9 +1307,9 @@ Read the console output from step 4 and write up, in the final report (not a fil
 
 ## Self-Review (done while writing)
 
-**Spec coverage:** `lib/scrapers/predpredaj.ts` exporting `scrapePredpredaj` (Task 3), SK-only + `country: 'SK'` handling (Task 3, Review Focus #1), category listing + single-date + tour-page parsing including the JSON-LD discovery and the `li.list-group-item` false-positive trap (Task 2, Review Focus #2), HTML entity decoding (Task 1, Review Focus #3), price-tier parsing and the tour-stop `null` price rule (Tasks 1–3), robots.txt-aware skip before fetch (Task 3, Review Focus #4), the `maxEventsPerCategory` cap on actual fetches (Task 3, Review Focus #5), category→genre via the existing `normalizeGenre` (verified in the spec, consumed directly in Task 3's `PREDPREDAJ_CATEGORY_LABEL`), `/api/cron/scrape` with bearer auth and required `?category=` (Task 4), `vercel.json` seven-entry stagger (Task 4), fixtures and fixture-only unit tests plus one live smoke run reported (Tasks 1–2 for fixtures, Task 5 for the live run). Images hotlinked not rehosted, descriptions never scraped: both are simply never read from the parsed data (Task 2/3 — there is no field for either).
+**Spec coverage:** `lib/scrapers/predpredaj.ts` exporting `scrapePredpredaj` (Task 3), SK-only + `country: 'SK'` handling (Task 3, Review Focus #1), category listing + single-date + tour-page parsing including the JSON-LD discovery and the `li.list-group-item` false-positive trap (Task 2, Review Focus #2), HTML entity decoding (Task 1, Review Focus #3), price-tier parsing and the tour-stop `null` price rule (Tasks 1–3), robots.txt-aware skip before fetch (Task 3, Review Focus #4), the optional `maxEventsPerCategory`/`--max-pages` cap on actual fetches (Task 3, Review Focus #5), category→genre via the existing `normalizeGenre` (verified in the spec, consumed directly in Task 3's `PREDPREDAJ_CATEGORY_LABEL`), the CLI entry point and GitHub Actions schedule with `workflow_dispatch`, `timeout-minutes`, `concurrency`, and named secrets (Task 4/5), the thin `CRON_SECRET`-protected route kept for manual triggering (Task 5), `Source` row creation (Task 4's `runScrape`, plus the seed fix in Task 5), fixtures and fixture-only unit tests plus one live smoke run reported (Tasks 1–2 for fixtures, Task 6 for the live run). Images hotlinked not rehosted, descriptions never scraped: both are simply never read from the parsed data (Task 2/3 — there is no field for either).
 
-**Type consistency:** `PredpredajCategory`/`PREDPREDAJ_CATEGORIES`/`PREDPREDAJ_CATEGORY_LABEL`/`PREDPREDAJ_BASE_URL` defined in Task 2, used identically in Tasks 3 and 4. `ParsedSingleDateEvent`/`ParsedTour`/`ParsedTourStop`/`ParsedEventDetail` defined in Task 2, consumed by name (`detail.kind`, `detail.venue`, `detail.stops`, etc.) in Task 3 with matching field names throughout. `ScrapePredpredajOptions` defined and consumed within Task 3; its shape (`categories`, `maxEventsPerCategory`, `delayMs`, `fetchImpl`) matches what Task 4's route and Task 5's script pass.
+**Type consistency:** `PredpredajCategory`/`PREDPREDAJ_CATEGORIES`/`PREDPREDAJ_CATEGORY_LABEL`/`PREDPREDAJ_BASE_URL` defined in Task 2, used identically in Tasks 3, 4 and 5. `ParsedSingleDateEvent`/`ParsedTour`/`ParsedTourStop`/`ParsedEventDetail` defined in Task 2, consumed by name in Task 3 with matching field names. `ScrapePredpredajOptions` defined and consumed within Task 3; `RunScrapeOptions`/`ScraperSource`/`SOURCES` defined in Task 4 and consumed identically by Task 4's own CLI and Task 5's route (`{ source, categories, maxEventsPerCategory }` throughout).
 
 **Review Focus:** all five items have an owning task and a named test, as listed under Spec coverage above.
 
