@@ -252,119 +252,175 @@ Ingest DB flow is verified by running the seed against the Neon dev branch and i
   filter today lists only Slovak regions plus "Austria" and "Svet" (World).
   Country is derived the normal way (`countryForCity`, defaulting through
   `normalizeCity`) — nothing SK-specific needs hardcoding.
-- **Category pages**, footer nav (7): `/sk/kategoria/{koncert,sport,show,
-  divadlo,festival,pre-deti,ostatne}/`. No pagination markers found on the
-  concert category (~79 event links on one page, no `?page=`/"load more");
-  treat categories as effectively single-page but cap at a defensible page
-  count defensively in case a busier category (e.g. `sport`) does paginate.
-  A finer 15-value subcategory tag list also exists in the sidebar filter
-  (Divadlo, Festival, Gastro, Hudba, Koncert, Konferencia, **Kultúra**, Kurz,
-  Online event, Ostatné, Pre deti, Prednáška, Show, Šport, Workshop) — prefer
-  it over the 7-value nav category when present, since it disambiguates
-  exhibitions (`Kultúra`) from concerts, which the 7-value list cannot.
-- **Category listing markup** (confirmed from the fixture, not guessed):
-  each card is `article.box`, with `.badge` = category text, `h2.box-item-
-  title > span` = title, `img.box-item-img[src]` = thumbnail, and the
-  detail link is the `<a class="box-item-btn">` inside the desktop
-  (`.box-content.d-none.d-md-block`) variant — the mobile variant repeats
-  the same title/badge with no link, so selecting `.box-item-btn` alone
-  (not the whole card) avoids picking up a stray duplicate.
-- **Event pages** (`/sk/listky/{slug}/`) come in two shapes, both confirmed
-  from real fixtures:
-  - **Single-date**: `h1` = title; the following `<p class="mb-4">` holds
-    two lines separated by `<br>` — `DD.MM.YYYY HH:MM` (an `<i>` icon
-    precedes it, strip it) then a comma-separated venue address (`<venue
-    name>, <street>, <postal code + city>` — the postal code prefix,
-    `^\d{3}\s?\d{2}\s+`, is stripped before the last segment goes to
-    `normalizeCity`; the street segment is discarded, `RawEvent` has no
-    address field). Price tiers (see below) follow further down the page.
-  - **Tour pages** (recurring acts, e.g. a Christmas concert series): a
-    `<ul>` of `<li class="list-group-item"><a href="/sk/listky/{own-
-    slug}/">` — **each stop already has its own real, unique detail page
-    URL** (e.g. `…-nitra-1-2026-12-13/`, `…-nitra-2-2026-12-13/`), so
-    there is no shared-URL problem to solve. Each `<li>` carries everything
+- **Category pages**, footer nav (7 values — the only reliable category
+  signal, see below): `/sk/kategoria/{koncert,sport,show,divadlo,festival,
+  pre-deti,ostatne}/`. No pagination markers found on the concert category
+  (~79 event links on one page, no `?page=`/"load more"); treat categories
+  as effectively single-page but cap at a defensible count defensively in
+  case a busier category paginates. A finer 15-value tag list (Divadlo,
+  Festival, Gastro, Hudba, Koncert, Konferencia, Kultúra, Kurz, Online
+  event, Ostatné, Pre deti, Prednáška, Show, Šport, Workshop) exists, but
+  only as the sidebar *filter widget*'s option list, present verbatim on
+  every page — it is **not** a per-event tag. The `.badge` elements that
+  appear to carry a finer category on an event's own detail page belong to
+  its "recommended events" sidebar cards, not the event itself (confirmed:
+  the same four-ish badges recur near-identically across unrelated pages).
+  **The category an event was crawled under (the `/sk/kategoria/{slug}/`
+  page it came from) is the only category signal we have, and it's
+  reliable enough** — use it directly, do not try to read a badge off the
+  event page.
+- **Category listing markup** (confirmed from the fixture): each card is
+  `article.box`, with `h2.box-item-title > span` = title, `img.box-item-
+  img[src]` = thumbnail, and the detail link is the `<a class="box-item-
+  btn">` inside the desktop (`.box-content.d-none.d-md-block`) variant —
+  the mobile variant repeats the same title with no link, so selecting
+  `.box-item-btn` alone (not the whole card) avoids a stray duplicate.
+- **Event pages** (`/sk/listky/{slug}/`) carry a schema.org `Event`
+  JSON-LD block (`<script type="application/ld+json">`) — use it as the
+  primary data source instead of parsing visible text; it is far more
+  reliable and already does the date/city split for us. Two shapes,
+  distinguished by whether its `startDate` is populated:
+  - **Single-date** (`startDate` non-empty, e.g. `"2026-11-06 19:00"` —
+    `YYYY-MM-DD HH:mm`, a Europe/Prague/Bratislava wall-clock reading,
+    both zones share the same offset year-round): `name` = title,
+    `location.address` = **already the bare city name** (confirmed
+    against both a zip-prefixed address, `"086 31 Bardejov"` → `address:
+    "Bardejov"`, and a zip-less one — predpredaj does the stripping for
+    us, so `RawEvent.city` needs no postal-code regex), `location.name`
+    = the full comma-joined address (`<venue>, <street>, <postal +
+    city>`) whose *first* segment is the venue name, `image` = the
+    event's own hero image (not the category-card thumbnail — richer
+    and always present). JSON-LD string values are themselves
+    HTML-entity-escaped (`"Diana Damrau &amp; Slovenská..."` literally,
+    not a real `&`) — the whole site does this consistently (same escaping
+    shows up in `<title>`/`<meta description>`), so every JSON-LD string
+    needs an HTML-entity-decode pass (`&amp;`, `&lt;`, `&gt;`, `&quot;`,
+    `&#39;`/`&apos;`, and numeric `&#NNN;`/`&#xHEX;`) before use.
+    Price tiers (see below) are parsed separately from the visible page,
+    not from JSON-LD (JSON-LD carries no price).
+  - **Tour pages** (recurring acts, e.g. a Christmas concert series;
+    `startDate` empty, `location.name` a generic `"Slovensko"` or a bare
+    comma list of cities): the real per-stop data lives in a `<ul>` of
+    `<li class="list-group-item"><a href="/sk/listky/{own-slug}/">`
+    — **each stop already has its own real, unique detail page URL**
+    (e.g. `…-nitra-1-2026-12-13/`, `…-nitra-2-2026-12-13/`), so there is
+    no shared-URL problem to solve. Each such `<li>` carries everything
     needed inline: `<strong>` = that stop's title (already includes a
-    location suffix when a city repeats, `Nitra`, `Nitra 2`), `<span>` =
-    `DD.MM.YYYY HH:MM - <venue address>` (same address format as above).
-    **Scrape each stop directly from this list — do not additionally fetch
-    each stop's own page**: the hub page carries zero `Cena`/price markup
-    (confirmed on the fixture), so the extra round trip buys nothing but
-    load on their server for our purposes. `priceFrom` is `null` for every
-    stop scraped this way (a real, legitimate value, not a failure) since
-    price tiers never render on the hub page. If a future pass wants
-    per-stop pricing, that is a second, explicit fetch of each stop's own
-    URL, added as its own task, not assumed here.
-  - One observed **single-date** page had a **stale slug vs. live date**
-    (URL says `-2026-09-06`, the rendered page says `02.09.2027` — a
-    reschedule the site never renamed the URL for). A pinning test should
-    cover trusting the rendered date over anything inferred from the URL.
-  - **Price** (single-date pages only, per the above): a list of ticket
-    tiers, each `Cena X,XX\u00A0€` (comma decimal); `priceFrom` = the
-    minimum across tiers. No free (`0,00 €`) example was seen live, but the
-    format implies it renders the same way as any other tier — treat it as
-    a real free price, not absence. A page with no tiers rendered (not yet
-    on sale) means unknown price (`null`), not a crawl failure.
+    location suffix when a city repeats, `Nitra`, `Nitra 2`), `<span
+    class="text-readable">` = `DD.MM.YYYY HH:MM - <venue address>` (dash-
+    separated here, unlike the single-date page's plain whitespace split
+    — confirmed on the fixture; same comma-joined address format, same
+    "first segment is the venue" rule, but *without* JSON-LD's free city
+    extraction, so this path does need the postal-code strip,
+    `^\d{3}\s?\d{2}\s+`, on the address's last comma segment before
+    `normalizeCity`). **Beware:** `li.list-group-item` alone is not a
+    safe selector — the class name is reused elsewhere on the page (a
+    single-date page fixture has 14 unrelated `li.list-group-item`
+    elements, zero of which are tour stops); scope to `li.list-group-item
+    > a[href^="/sk/listky/"]` and prefer the JSON-LD `startDate`-empty
+    check as the primary single-date-vs-tour discriminator, not
+    `li.list-group-item`'s mere presence.
+    **Scrape each stop directly from this list — do not additionally
+    fetch each stop's own page**: the hub page carries zero `Cena`/price
+    markup (confirmed on the fixture), so the extra round trip buys
+    nothing but load on their server for our purposes. `priceFrom` is
+    `null` for every stop scraped this way (a real, legitimate value, not
+    a failure). If a future pass wants per-stop pricing, that is a
+    second, explicit fetch of each stop's own URL, added as its own task.
+    Reuse the tour's own JSON-LD `image` for every stop (each stop's own
+    page was not fetched to have a better one).
+  - A related fixture (not the tour page itself, a *different*, single-
+    date one) showed a **stale slug vs. live date**: URL says
+    `-2026-09-06`, JSON-LD `startDate` says `2027-09-02 19:00` — a
+    reschedule the site never renamed the URL for. Trusting JSON-LD's
+    `startDate` (not the URL) already handles this correctly by
+    construction; no special-case code needed, just don't be tempted to
+    parse a date out of the slug as a shortcut.
+  - **Price** (single-date pages; parsed from the rendered HTML, not
+    JSON-LD): each tier is `<small class="color-blue">Cena</small><br>
+    X,XX €` (comma decimal, the amount sometimes wrapped in an inner
+    `<span>` — select on the label text, then read the *parent* element's
+    full text and regex the number out of it, which is robust to either
+    shape); `priceFrom` = the minimum across tiers. No free (`0,00 €`)
+    example was seen live, but the format implies it renders the same way
+    as any other tier — treat it as a real free price, not absence. A
+    page with no tiers rendered (not yet on sale) means unknown price
+    (`null`), not a crawl failure.
   - Currency is always EUR (Slovakia).
-  - Images: hotlink predpredaj's own image URL directly, matching plan 1's
-    "plain `<img>` until scrapers reveal hosts for `next/image`
-    `remotePatterns`" — do not rehost. Descriptions are not scraped at all
-    (deep-link to predpredaj's own page for anyone who wants one), per the
-    same "why redistribute what we can link to" reasoning as the outreach
-    email.
-- **Category → genre** (prefer the 15-value subcategory tag when the page
-  has one, else the 7-value nav category):
+  - Images: hotlink predpredaj's own image URL directly (JSON-LD `image`
+    field, see above), matching plan 1's "plain `<img>` until scrapers
+    reveal hosts for `next/image` `remotePatterns`" — do not rehost.
+    Descriptions are not scraped at all (JSON-LD's `description` field is
+    ignored) — deep-link to predpredaj's own page for anyone who wants
+    one, per the same "why redistribute what we can link to" reasoning as
+    the outreach email.
+- **Category → genre** — the crawled category (the 7-value nav list, see
+  above; there is no reliable finer per-event signal) maps directly:
 
-  | predpredaj | Genre |
+  | predpredaj category | Genre |
   |---|---|
-  | Koncert, Hudba | `concert` |
+  | Koncert | `concert` |
   | Šport | `sport` |
   | Divadlo | `theatre` |
-  | Kultúra, Gastro | `exhibition` (closest fit; "Gastro" is a stretch but
-    there is no food/tasting genre in our 7 — same call plan 1 already
-    made for goout's mock `gastronomy` rows, mapped to `other` there;
-    predpredaj's `Kultúra` is closer to real exhibitions so gets its own
-    line, `Gastro` still falls to `other` unless it's clearly an exhibit) |
-  | Show | `other` (talk shows, galas — not clearly standup; a `standup`
-    match only fires on an explicit "stand-up"/"comedy" keyword hit via the
-    existing `normalizeGenre` keyword table, which predpredaj's tags don't
-    supply — direct-mapped categories bypass `normalizeGenre` entirely, see
-    below) |
   | Festival | `concert`, multi-day (`endsAt` set) when the page shows a
     date range instead of one date |
+  | Show | `other` (talk shows, galas — not clearly standup; a `standup`
+    match only fires on an explicit "stand-up"/"comedy" keyword hit via
+    the existing `normalizeGenre` keyword table, which a direct category
+    mapping bypasses entirely, see below) |
   | Pre deti | `other` |
-  | Konferencia, Kurz, Workshop, Prednáška, Online event | `other` |
   | Ostatné | `other` |
+
+  There is no `exhibition`-shaped category among the 7 (`Kultúra`, which
+  would fit best, is only ever a filter-widget option, never a crawlable
+  `/sk/kategoria/` page or a real per-event value) — predpredaj simply
+  doesn't surface exhibitions as a first-class category the way GoOut's
+  mock data did. Not a gap to work around; there is nothing to map.
 
   Map directly in the scraper adapter (`lib/scrapers/predpredaj.ts`) to a
   `Genre`, bypassing `normalizeGenre`'s keyword matching — predpredaj's
   categories are a small fixed enum, not free text, so a direct lookup is
-  more precise (this mirrors the same call made for goout's category enum
-  in the Task 5/6 self-review, never implemented since goout is on hold).
+  more precise (the same call was proposed for goout's category enum in
+  the Task 5/6 self-review, never implemented since goout is on hold).
 
 ### Ingest and cron
 
-- `lib/scrapers/predpredaj.ts` exports `scrapePredpredaj(): Promise<RawEvent[]>`
-  (fetch + cheerio, no Playwright — the pages are server-rendered).
-  Sequential category crawl, 1–2s delay between requests (`setTimeout`
-  between fetches, not `Promise.all`), custom `User-Agent` naming the
-  project and a contact email, and a `robots.txt`-aware check before the
-  first request (hardcode the five known disallowed slugs plus a live
-  robots.txt fetch, so a future addition to the disallow list is honored
-  without a code change).
+- `lib/scrapers/predpredaj.ts` exports `scrapePredpredaj(options?: {
+  categories?: PredpredajCategory[]; maxEventsPerCategory?: number }):
+  Promise<RawEvent[]>` (fetch + cheerio, no Playwright — the pages are
+  server-rendered). Sequential crawl (never `Promise.all` — the delay
+  requirement means requests are deliberately serial), 1–2s delay between
+  every request including within a category, custom `User-Agent` naming
+  the project and a contact email, and a `robots.txt`-aware check before
+  the first request (hardcode the five known disallowed slugs plus a live
+  `robots.txt` fetch each run, so a future addition to the disallow list
+  is honored without a code change).
+- **Chunking, decided here (not deferred):** one detail-page fetch per
+  listed item (~80 events just in `koncert`, times 7 categories) at 1–2s
+  delay would run for minutes — well past any typical serverless function
+  budget. `/api/cron/scrape` requires a `?category=<predpredaj-category>`
+  param (one of the 7); there is no whole-site mode. `vercel.json` defines
+  **seven cron entries**, one per category, staggered by ten minutes each
+  (`0 */6 * * *`, `10 */6 * * *`, … `0,10,20,30,40,50` past the hour on
+  the six-hourly tick) so they never run concurrently and never overlap
+  the next category's own six-hour cycle. Each run also caps at
+  `maxEventsPerCategory` (default 30, via `PREDPREDAJ_MAX_EVENTS_PER_
+  CATEGORY` — an env var, not a hardcoded constant, so it can be tuned to
+  whatever `maxDuration` the deployed function actually allows without a
+  redeploy) — 30 events × ~1.5s ≈ 45s, comfortable under a 60s budget
+  including the category-listing fetch and DB writes. A category with
+  more events than the cap converges over several six-hourly ticks rather
+  than all at once; this is an accepted staleness tradeoff for plan C′,
+  not a bug — `koncert` (the biggest) fully refreshes roughly every
+  3 ticks (18h) at the default cap, everything smaller refreshes every
+  tick. Route also accepts `?maxEvents=` to override the cap per call
+  (for the live smoke test task, which limits far below 30).
 - `/api/cron/scrape`: `Authorization: Bearer $CRON_SECRET`, calls
-  `scrapePredpredaj()`, then `upsertRawEvents`, updates
-  `Source.lastScrapedAt`, returns `{ created, updated, merged, skipped }`.
-  Same route will grow a second scraper call when goout/ticketportal
-  unblock; keep it structured as a list of scrapers run in sequence, not a
-  single hardcoded call, so that addition is a one-line change.
-  Time budget: category crawl (7 pages) + one detail-page fetch per event
-  (~80–150 events across categories, some shared) at 1–2s delay is close to
-  Vercel's default function timeout on the Hobby tier; the plan chunks by
-  category if a single run risks it (route accepts an optional
-  `?category=` param the cron config can call multiple times, or the
-  function reports partial progress and a second cron tick catches up —
-  decided in the plan, not here).
-- `vercel.json`: `0 */6 * * *`, same as originally scoped for goout.
+  `scrapePredpredaj({ categories: [category], maxEventsPerCategory })`,
+  then `upsertRawEvents`, updates `Source.lastScrapedAt`, returns
+  `{ created, updated, merged, skipped }`. Structured as a list of scraper
+  calls (currently just the one), not a single hardcoded call, so a
+  second scraper (once goout/ticketportal unblock) is a one-line addition.
 
 ### Outreach
 
