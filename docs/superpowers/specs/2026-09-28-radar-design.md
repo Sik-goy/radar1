@@ -18,9 +18,9 @@ Each plan gets its own written plan and implementation cycle.
 
 1. **Foundation**: schema, migrations, normalizer, dedupe/ingest, mock seed, UI, unit tests.
 2. NextAuth magic link + favorites.
-3. goout scraper + `/api/cron/scrape` (`CRON_SECRET`) + `vercel.json` cron `0 */6 * * *`.
-4. predpredaj scraper.
-5. ticketportal scraper.
+3. ~~goout scraper~~ — **on hold** (2026-09-29): goout.net's terms of use forbid publishing/redistributing site content without written consent (see "Plan C investigation" below). Outreach sent (`docs/outreach/goout.md`); revisit if they consent or offer a partner feed.
+4. **predpredaj scraper** (plan C′, pulled forward ahead of goout/ticketportal — see addendum below) + `/api/cron/scrape` (`CRON_SECRET`) + `vercel.json` cron `0 */6 * * *`.
+5. ticketportal scraper (same corporate owner as goout — PLG — so carries the same ToS risk; deprioritized until goout is resolved one way or the other).
 6. Weekly digest (Resend).
 
 Every scraper: check robots.txt, delay between requests, fixture-based tests, one live smoke run.
@@ -212,6 +212,153 @@ Ingest DB flow is verified by running the seed against the Neon dev branch and i
 - "Genre chi" = genre chips.
 - "Levenshtein < 0.2" = normalized distance (edit distance / longer title length).
 - Digest matching uses favorites' city and genre sets, not per-event follow.
+
+## Addendum (2026-09-29): source investigation and the predpredaj scraper (plan C′)
+
+### Sources investigated, and why predpredaj is next
+
+- **goout.net**: technically excellent (a clean public JSON endpoint,
+  `services/entities/v1/schedules`, no scraping needed) but its terms of use
+  explicitly restrict publishing/redistributing site content without written
+  consent (private-use-only otherwise). Put on hold; outreach email drafted
+  and sent, see `docs/outreach/goout.md`.
+- **ticketportal.sk**: same corporate owner as goout (PLG group, confirmed via
+  shared footer links) — same ToS risk, deprioritized alongside it.
+- **Ticketmaster Discovery API**: legally the cleanest (a real third-party API
+  license built for display+deep-link use), but live-tested and rejected on
+  coverage: **zero events in Slovakia**, and Czech coverage (188 events over
+  60 days) is ~93% concentrated in Prague, almost entirely major international
+  arena tours at O2 Arena/Forum Karlín (each show often double-listed as a
+  separate "Fast Track"/VIP entry), no exhibitions, and **zero events carry
+  `priceRanges`**. Not usable as a source; kept as a possible later
+  secondary source for big Prague arena shows only, if a title filter is
+  added to collapse the Fast Track duplicates.
+- **eventim.cz / eventim.sk**: blocked by Akamai bot protection at the TLS
+  layer — even a real headless browser got `ERR_HTTP2_PROTOCOL_ERROR`.
+  Dropped.
+- **predpredaj.zoznam.sk** (predpredaj.sk redirects here): owned by Zoznam.sk,
+  *not* PLG. `robots.txt` only disallows five specific stale 2020 event URLs,
+  no blanket restriction. Read their ticket-purchase terms (VOP) PDF in full
+  — no scraping/redistribution/copyright clause found (it covers ticket
+  delivery mechanics, not content usage). Server-rendered, real event data
+  in the raw HTML. **Chosen as the next scraper.**
+
+### predpredaj.zoznam.sk: site facts
+
+- **SK only.** No `/cz/` path (404); `/en/` exists but is an English UI over
+  the same Slovak inventory, not Czech events. `robots.txt`'s five disallowed
+  slugs happen to be 2020 Brno/Praha events, confirming a Czech-city event
+  can occasionally appear (cross-border tours, historically), but the region
+  filter today lists only Slovak regions plus "Austria" and "Svet" (World).
+  Country is derived the normal way (`countryForCity`, defaulting through
+  `normalizeCity`) — nothing SK-specific needs hardcoding.
+- **Category pages**, footer nav (7): `/sk/kategoria/{koncert,sport,show,
+  divadlo,festival,pre-deti,ostatne}/`. No pagination markers found on the
+  concert category (~79 event links on one page, no `?page=`/"load more");
+  treat categories as effectively single-page but cap at a defensible page
+  count defensively in case a busier category (e.g. `sport`) does paginate.
+  A finer 15-value subcategory tag list also exists in the sidebar filter
+  (Divadlo, Festival, Gastro, Hudba, Koncert, Konferencia, **Kultúra**, Kurz,
+  Online event, Ostatné, Pre deti, Prednáška, Show, Šport, Workshop) — prefer
+  it over the 7-value nav category when present, since it disambiguates
+  exhibitions (`Kultúra`) from concerts, which the 7-value list cannot.
+- **Event pages** (`/sk/listky/{slug}/`) come in two shapes:
+  - **Single-date**: one header line — title, `DD.MM.YYYY HH:MM`, then a
+    comma-separated venue address (`<venue name>, <street>, <postal code +
+    city>` — the postal code prefix, `^\d{3}\s?\d{2}\s+`, is stripped before
+    the last segment goes to `normalizeCity`; the street segment is
+    discarded, `RawEvent` has no address field).
+  - **Tour pages** (recurring acts, e.g. a Christmas concert series): the
+    same header line repeated once per stop, each with its own date, time
+    and venue, and a location suffix in the title when a city repeats
+    twice (`Nitra`, `Nitra 2`). Each stop is its own `RawEvent`; the page's
+    own `sourceUrl` is shared across stops (deep-link target for all of
+    them, since predpredaj doesn't give each stop its own URL) — this is
+    fine, `EventSource.url` uniqueness is scoped to the *ingested* event,
+    not to the page, and the first stop to be ingested wins the URL,
+    later stops fall through to fingerprint/fuzzy match and get created
+    as their own events with their own (synthetic, non-navigable-to-a-
+    single-stop) `sourceUrl` collision — **note for the plan**: this needs
+    a decision (append a stable per-stop query param to the shared URL,
+    e.g. `?date=DD.MM.YYYY`, so each stop gets a distinct, real,
+    deep-linkable `EventSource.url` back to the same page).
+  - One observed page had a **stale slug vs. live date** (URL says
+    `-2026-09-06`, the rendered page says `02.09.2027` — a reschedule the
+    site never renamed the URL for). A pinning test should cover trusting
+    the rendered date over anything inferred from the URL.
+  - **Price**: a list of ticket tiers, each `Cena X,XX €` (comma
+    decimal, narrow-space thousands where relevant); `priceFrom` = the
+    minimum across tiers. No free (`0,00 €`) example was seen live, but the
+    format implies it renders the same way as any other tier — treat it as
+    a real free price, not absence. A page with no tiers rendered (not yet
+    on sale) means unknown price (`null`), not a crawl failure.
+  - Currency is always EUR (Slovakia).
+  - Images: hotlink predpredaj's own image URL directly, matching plan 1's
+    "plain `<img>` until scrapers reveal hosts for `next/image`
+    `remotePatterns`" — do not rehost. Descriptions are not scraped at all
+    (deep-link to predpredaj's own page for anyone who wants one), per the
+    same "why redistribute what we can link to" reasoning as the outreach
+    email.
+- **Category → genre** (prefer the 15-value subcategory tag when the page
+  has one, else the 7-value nav category):
+
+  | predpredaj | Genre |
+  |---|---|
+  | Koncert, Hudba | `concert` |
+  | Šport | `sport` |
+  | Divadlo | `theatre` |
+  | Kultúra, Gastro | `exhibition` (closest fit; "Gastro" is a stretch but
+    there is no food/tasting genre in our 7 — same call plan 1 already
+    made for goout's mock `gastronomy` rows, mapped to `other` there;
+    predpredaj's `Kultúra` is closer to real exhibitions so gets its own
+    line, `Gastro` still falls to `other` unless it's clearly an exhibit) |
+  | Show | `other` (talk shows, galas — not clearly standup; a `standup`
+    match only fires on an explicit "stand-up"/"comedy" keyword hit via the
+    existing `normalizeGenre` keyword table, which predpredaj's tags don't
+    supply — direct-mapped categories bypass `normalizeGenre` entirely, see
+    below) |
+  | Festival | `concert`, multi-day (`endsAt` set) when the page shows a
+    date range instead of one date |
+  | Pre deti | `other` |
+  | Konferencia, Kurz, Workshop, Prednáška, Online event | `other` |
+  | Ostatné | `other` |
+
+  Map directly in the scraper adapter (`lib/scrapers/predpredaj.ts`) to a
+  `Genre`, bypassing `normalizeGenre`'s keyword matching — predpredaj's
+  categories are a small fixed enum, not free text, so a direct lookup is
+  more precise (this mirrors the same call made for goout's category enum
+  in the Task 5/6 self-review, never implemented since goout is on hold).
+
+### Ingest and cron
+
+- `lib/scrapers/predpredaj.ts` exports `scrapePredpredaj(): Promise<RawEvent[]>`
+  (fetch + cheerio, no Playwright — the pages are server-rendered).
+  Sequential category crawl, 1–2s delay between requests (`setTimeout`
+  between fetches, not `Promise.all`), custom `User-Agent` naming the
+  project and a contact email, and a `robots.txt`-aware check before the
+  first request (hardcode the five known disallowed slugs plus a live
+  robots.txt fetch, so a future addition to the disallow list is honored
+  without a code change).
+- `/api/cron/scrape`: `Authorization: Bearer $CRON_SECRET`, calls
+  `scrapePredpredaj()`, then `upsertRawEvents`, updates
+  `Source.lastScrapedAt`, returns `{ created, updated, merged, skipped }`.
+  Same route will grow a second scraper call when goout/ticketportal
+  unblock; keep it structured as a list of scrapers run in sequence, not a
+  single hardcoded call, so that addition is a one-line change.
+  Time budget: category crawl (7 pages) + one detail-page fetch per event
+  (~80–150 events across categories, some shared) at 1–2s delay is close to
+  Vercel's default function timeout on the Hobby tier; the plan chunks by
+  category if a single run risks it (route accepts an optional
+  `?category=` param the cron config can call multiple times, or the
+  function reports partial progress and a second cron tick catches up —
+  decided in the plan, not here).
+- `vercel.json`: `0 */6 * * *`, same as originally scoped for goout.
+
+### Outreach
+
+Same pitch as goout (deep-link only, no description copying, attribution
+shown, ask for consent or a partner feed), drafted in Slovak at
+`docs/outreach/predpredaj.md`, addressed to Zoznam (predpredaj's operator).
 
 ## Open questions (dedupe tuning, deferred to the scraper plan)
 
