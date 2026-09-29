@@ -16,4 +16,14 @@ Aggregated event feed for Slovakia and Czech Republic.
 - `npm run typecheck`
 - `npm run build`
 
+## Scraping
+
+`npm run scrape -- --source predpredaj [--category <koncert|sport|show|divadlo|festival|pre-deti|ostatne>] [--max-pages N]`
+scrapes predpredaj.zoznam.sk and ingests the result. `.github/workflows/scrape.yml` runs this
+on a schedule (every 6 hours) and via a manual "Run workflow" button; `DATABASE_URL` and
+`DIRECT_URL` are set as GitHub Actions secrets, not committed.
+
+`GET /api/cron/scrape` (optionally `?category=...&maxEvents=...`), with
+`Authorization: Bearer $CRON_SECRET`, runs the same thing over HTTP for manual triggering.
+
 Design: `docs/superpowers/specs/2026-09-28-radar-design.md`

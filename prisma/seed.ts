@@ -5,7 +5,7 @@ import { buildMockEvents } from '@/lib/mock-events';
 
 const SOURCES = [
   { slug: 'goout', name: 'GoOut', baseUrl: 'https://goout.net' },
-  { slug: 'predpredaj', name: 'Predpredaj', baseUrl: 'https://www.predpredaj.sk' },
+  { slug: 'predpredaj', name: 'Predpredaj', baseUrl: 'https://predpredaj.zoznam.sk' },
   { slug: 'ticketportal', name: 'Ticketportal', baseUrl: 'https://www.ticketportal.sk' },
 ];
 
