@@ -148,6 +148,31 @@ describe('reconcileRescrape', () => {
     expect(reconcileRescrape(existing, incoming, false)).toEqual(incoming);
   });
 
+  it('a single-source event never leaks fields beyond the five it declares, even when the caller\'s real object (a NormalizedEvent) has more of them', () => {
+    // Real bug, caught live: ingest.ts always calls this with a full NormalizedEvent (sourceSlug, url,
+    // price, priceCurrency, country, currency, genre, imageUrl, ...) as `incoming`. TypeScript's
+    // structural typing lets that through silently; a `{ ...incoming }` implementation here would
+    // spread every one of those extra fields straight into a Prisma `Event.update()` payload later,
+    // which then throws "Unknown argument `sourceSlug`" — exactly what happened on a real re-scrape.
+    const incomingNormalizedEventShaped = {
+      startsAt: new Date('2026-10-11T19:00:00Z'),
+      title: 'Jazz Night Reloaded',
+      venue: 'New Club',
+      endsAt: new Date('2026-10-11T21:00:00Z'),
+      fingerprint: 'jazz night reloaded|new club|2026-10-11',
+      sourceSlug: 'predpredaj',
+      url: 'https://predpredaj.zoznam.sk/sk/listky/jazz-night/',
+      price: 15,
+      priceCurrency: 'EUR',
+      country: 'SK',
+      currency: 'EUR',
+      genre: 'concert',
+      imageUrl: 'https://img/x.jpg',
+    };
+    const result = reconcileRescrape(existing, incomingNormalizedEventShaped, false);
+    expect(Object.keys(result).sort()).toEqual(['endsAt', 'fingerprint', 'startsAt', 'title', 'venue']);
+  });
+
   it('a multi-source event ignores a small startsAt drift and keeps every other field', () => {
     const incoming = { ...existing, startsAt: new Date(existing.startsAt.getTime() + 30 * 60_000) };
     expect(reconcileRescrape(existing, incoming, true)).toEqual({});

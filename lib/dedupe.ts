@@ -97,7 +97,18 @@ export function reconcileRescrape(
   incoming: RescrapeFields,
   hasOtherSources: boolean,
 ): Partial<RescrapeFields> {
-  if (!hasOtherSources) return { ...incoming };
+  // Pick only the declared fields — the real caller passes a full NormalizedEvent (sourceSlug, url,
+  // price, ...) as `incoming`; TypeScript's structural typing lets that through silently, but a plain
+  // `{ ...incoming }` here would leak all of it into a downstream Prisma `Event.update()` payload.
+  if (!hasOtherSources) {
+    return {
+      startsAt: incoming.startsAt,
+      title: incoming.title,
+      venue: incoming.venue,
+      endsAt: incoming.endsAt,
+      fingerprint: incoming.fingerprint,
+    };
+  }
   const drift = Math.abs(incoming.startsAt.getTime() - existing.startsAt.getTime());
   return drift > FUZZY_WINDOW_MS ? { startsAt: incoming.startsAt } : {};
 }
