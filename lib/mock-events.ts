@@ -3,13 +3,19 @@ import { addDays, set } from 'date-fns';
 import { TZ } from '@/lib/dates';
 import type { RawEvent } from '@/lib/types';
 
-type Src = 'goout' | 'predpredaj' | 'ticketportal';
+type Vendor = 'goout' | 'predpredaj' | 'ticketportal';
 
-const HOSTS: Record<Src, string> = {
+const HOSTS: Record<Vendor, string> = {
   goout: 'https://goout.net/mock',
   predpredaj: 'https://www.predpredaj.sk/mock',
   ticketportal: 'https://www.ticketportal.sk/mock',
 };
+
+// Every RawEvent this file builds is attributed to this one Source, never a real scraper's own slug
+// ('goout', 'predpredaj', 'ticketportal' name the fake vendor for URL variety only, see HOSTS above) —
+// so demo/mock data never lands under the same Source row a real scraper writes to (see prisma/seed.ts
+// and lib/scrapers/run-scrape.ts, which each own their own real Source by that real slug).
+const MOCK_SOURCE = 'mock';
 
 /** Prague wall-clock time `dayOffset` days from `now`. */
 function at(now: Date, dayOffset: number, hour: number, minute = 0): Date {
@@ -28,7 +34,7 @@ type Row = [
   day: number,
   hour: number,
   price: number | null,
-  sources: Src[],
+  vendors: Vendor[],
 ];
 
 const ROWS: Row[] = [
@@ -84,10 +90,10 @@ const ROWS: Row[] = [
 
 const IMAGELESS = new Set(['b06', 'p05', 'r06', 'k05']);
 
-function fromRow(now: Date, [id, title, venue, city, genre, day, hour, price, sources]: Row): RawEvent[] {
-  return sources.map((source, i) => ({
-    source,
-    sourceUrl: `${HOSTS[source]}/${id}`,
+function fromRow(now: Date, [id, title, venue, city, genre, day, hour, price, vendors]: Row): RawEvent[] {
+  return vendors.map((vendor, i) => ({
+    source: MOCK_SOURCE,
+    sourceUrl: `${HOSTS[vendor]}/${id}`,
     // Uppercased title on later sources: different text, same fingerprint.
     title: i === 0 ? title : title.toUpperCase(),
     venue,
@@ -103,23 +109,23 @@ function specials(now: Date): RawEvent[] {
   const minutesFromNow = (m: number) => new Date(now.getTime() + m * 60_000);
   return [
     // Fuzzy merge: same city, 30 min apart, venue spelled differently, title punctuation differs.
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-fuzzy-1`, title: 'Aurora Bloom – Tour 2026', venue: 'O2 arena', city: 'Praha', startsAt: at(now, 4, 19, 30), priceFrom: 990, rawGenre: 'Koncerty', imageUrl: image('s-fuzzy') },
-    { source: 'ticketportal', sourceUrl: `${HOSTS.ticketportal}/s-fuzzy-2`, title: 'Aurora Bloom Tour 2026', venue: 'O2 arena Praha', city: 'Praha', startsAt: at(now, 4, 20, 0), priceFrom: 1010, rawGenre: 'Koncerty', imageUrl: null },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-fuzzy-1`, title: 'Aurora Bloom – Tour 2026', venue: 'O2 arena', city: 'Praha', startsAt: at(now, 4, 19, 30), priceFrom: 990, rawGenre: 'Koncerty', imageUrl: image('s-fuzzy') },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.ticketportal}/s-fuzzy-2`, title: 'Aurora Bloom Tour 2026', venue: 'O2 arena Praha', city: 'Praha', startsAt: at(now, 4, 20, 0), priceFrom: 1010, rawGenre: 'Koncerty', imageUrl: null },
     // Currency mix: the EUR listing must not affect the CZK event price (expect 890).
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-cur-1`, title: 'Metal Tribute Night', venue: 'Rock Café', city: 'Praha', startsAt: at(now, 9, 21), priceFrom: 890, rawGenre: 'Metal', imageUrl: image('s-cur') },
-    { source: 'ticketportal', sourceUrl: `${HOSTS.ticketportal}/s-cur-2`, title: 'Metal Tribute Night', venue: 'Rock Café', city: 'Praha', startsAt: at(now, 9, 21), priceFrom: 35, currency: 'EUR', rawGenre: 'Metal', imageUrl: null },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-cur-1`, title: 'Metal Tribute Night', venue: 'Rock Café', city: 'Praha', startsAt: at(now, 9, 21), priceFrom: 890, rawGenre: 'Metal', imageUrl: image('s-cur') },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.ticketportal}/s-cur-2`, title: 'Metal Tribute Night', venue: 'Rock Café', city: 'Praha', startsAt: at(now, 9, 21), priceFrom: 35, currency: 'EUR', rawGenre: 'Metal', imageUrl: null },
     // Multi-day: exhibitions and festivals.
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-exh-1`, title: 'Výstava: Světlo a stín', venue: 'Galerie hlavního města Prahy', city: 'Praha', startsAt: at(now, -10, 10), endsAt: at(now, 30, 18), priceFrom: 250, rawGenre: 'Výstavy', imageUrl: image('s-exh-1') },
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-exh-2`, title: 'Nové smery: Súčasné umenie', venue: 'Galéria Dunaj', city: 'Bratislava', startsAt: at(now, -5, 10), endsAt: at(now, 40, 18), priceFrom: 0, rawGenre: 'Výstavy', imageUrl: image('s-exh-2') },
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-fest-1`, title: 'Letný festival Slnovrat', venue: 'Areál Zlatý piesok', city: 'Trenčín', startsAt: at(now, 20, 14), endsAt: at(now, 22, 23), priceFrom: 89, rawGenre: 'Festival', imageUrl: image('s-fest') },
-    { source: 'predpredaj', sourceUrl: `${HOSTS.predpredaj}/s-fest-2`, title: 'Letný festival Slnovrat', venue: 'Areál Zlatý piesok', city: 'Trenčín', startsAt: at(now, 20, 14), endsAt: at(now, 22, 23), priceFrom: 92, rawGenre: 'Festival', imageUrl: null },
-    { source: 'ticketportal', sourceUrl: `${HOSTS.ticketportal}/s-fest-3`, title: 'Hudební festival Barvy', venue: 'Areál Dolní oblast', city: 'Ostrava', startsAt: at(now, 12, 14), endsAt: at(now, 14, 23), priceFrom: 1490, rawGenre: 'Festival', imageUrl: image('s-fest-3') },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-exh-1`, title: 'Výstava: Světlo a stín', venue: 'Galerie hlavního města Prahy', city: 'Praha', startsAt: at(now, -10, 10), endsAt: at(now, 30, 18), priceFrom: 250, rawGenre: 'Výstavy', imageUrl: image('s-exh-1') },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-exh-2`, title: 'Nové smery: Súčasné umenie', venue: 'Galéria Dunaj', city: 'Bratislava', startsAt: at(now, -5, 10), endsAt: at(now, 40, 18), priceFrom: 0, rawGenre: 'Výstavy', imageUrl: image('s-exh-2') },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-fest-1`, title: 'Letný festival Slnovrat', venue: 'Areál Zlatý piesok', city: 'Trenčín', startsAt: at(now, 20, 14), endsAt: at(now, 22, 23), priceFrom: 89, rawGenre: 'Festival', imageUrl: image('s-fest') },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.predpredaj}/s-fest-2`, title: 'Letný festival Slnovrat', venue: 'Areál Zlatý piesok', city: 'Trenčín', startsAt: at(now, 20, 14), endsAt: at(now, 22, 23), priceFrom: 92, rawGenre: 'Festival', imageUrl: null },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.ticketportal}/s-fest-3`, title: 'Hudební festival Barvy', venue: 'Areál Dolní oblast', city: 'Ostrava', startsAt: at(now, 12, 14), endsAt: at(now, 14, 23), priceFrom: 1490, rawGenre: 'Festival', imageUrl: image('s-fest-3') },
     // Must be hidden: fully ended.
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-ended-1`, title: 'Skončená výstava', venue: 'Dům umění', city: 'Brno', startsAt: at(now, -20, 10), endsAt: at(now, -2, 18), priceFrom: 100, rawGenre: 'Výstavy', imageUrl: null },
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-ended-2`, title: 'Včerajší koncert', venue: 'Majestic Music Club', city: 'Bratislava', startsAt: at(now, -1, 20), priceFrom: 12, rawGenre: 'Koncerty', imageUrl: null },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-ended-1`, title: 'Skončená výstava', venue: 'Dům umění', city: 'Brno', startsAt: at(now, -20, 10), endsAt: at(now, -2, 18), priceFrom: 100, rawGenre: 'Výstavy', imageUrl: null },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-ended-2`, title: 'Včerajší koncert', venue: 'Majestic Music Club', city: 'Bratislava', startsAt: at(now, -1, 20), priceFrom: 12, rawGenre: 'Koncerty', imageUrl: null },
     // 2h effective end: 30 min ago shows in the Happening now row, 3h ago is hidden.
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-live-1`, title: 'Práve začína: klubová noc', venue: 'Subclub', city: 'Bratislava', startsAt: minutesFromNow(-30), priceFrom: 5, rawGenre: 'Elektronická hudba', imageUrl: null },
-    { source: 'goout', sourceUrl: `${HOSTS.goout}/s-live-2`, title: 'Už skončilo: popoludňajší koncert', venue: 'Reduta', city: 'Bratislava', startsAt: minutesFromNow(-180), priceFrom: 5, rawGenre: 'Koncerty', imageUrl: null },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-live-1`, title: 'Práve začína: klubová noc', venue: 'Subclub', city: 'Bratislava', startsAt: minutesFromNow(-30), priceFrom: 5, rawGenre: 'Elektronická hudba', imageUrl: null },
+    { source: MOCK_SOURCE, sourceUrl: `${HOSTS.goout}/s-live-2`, title: 'Už skončilo: popoludňajší koncert', venue: 'Reduta', city: 'Bratislava', startsAt: minutesFromNow(-180), priceFrom: 5, rawGenre: 'Koncerty', imageUrl: null },
   ];
 }
 

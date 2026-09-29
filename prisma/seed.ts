@@ -3,11 +3,10 @@ import { prisma } from '@/lib/db';
 import { upsertRawEvents } from '@/lib/ingest';
 import { buildMockEvents } from '@/lib/mock-events';
 
-const SOURCES = [
-  { slug: 'goout', name: 'GoOut', baseUrl: 'https://goout.net' },
-  { slug: 'predpredaj', name: 'Predpredaj', baseUrl: 'https://predpredaj.zoznam.sk' },
-  { slug: 'ticketportal', name: 'Ticketportal', baseUrl: 'https://www.ticketportal.sk' },
-];
+// Mock/demo data lives under its own Source, distinct from any real scraper's slug (lib/mock-events.ts
+// sets RawEvent.source to this same value) — so seeded demo events never collide with, or get confused
+// for, a real scraper's own Source row (e.g. predpredaj's, created by lib/scrapers/run-scrape.ts).
+const SOURCES = [{ slug: 'mock', name: 'Mock Data', baseUrl: 'https://example.com' }];
 
 async function main() {
   if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {

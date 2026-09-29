@@ -7,7 +7,8 @@ Aggregated event feed for Slovakia and Czech Republic.
 1. Node 20+, then `npm install`.
 2. Create a Neon **dev** branch. Copy `.env.example` to `.env` and fill `DATABASE_URL` (pooled) and `DIRECT_URL` (direct).
 3. `npm run db:migrate` (creates tables on the dev branch).
-4. `npm run db:seed` (wipes and reloads mock events; never point `.env` at production).
+4. `npm run db:seed` (wipes and reloads mock events under a dedicated `mock` Source, never a real
+   scraper's slug; never point `.env` at production).
 5. `npm run dev`, open http://localhost:3000.
 
 ## Scripts
@@ -15,6 +16,7 @@ Aggregated event feed for Slovakia and Czech Republic.
 - `npm test` unit tests (no DB or network)
 - `npm run typecheck`
 - `npm run build`
+- `npm run db:clear-mock` deletes only the `mock`-sourced demo events, leaving real scraped data alone
 
 ## Scraping
 
