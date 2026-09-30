@@ -65,15 +65,21 @@ model Source {
 }
 
 model EventSource {
-  id         String   @id @default(cuid())
-  eventId    String
-  sourceId   String
-  url        String   @unique
-  priceFrom  Decimal? @db.Decimal(10, 2)
-  currency   Currency
-  lastSeenAt DateTime
-  event      Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  source     Source   @relation(fields: [sourceId], references: [id])
+  id                  String    @id @default(cuid())
+  eventId             String
+  sourceId            String
+  url                 String    @unique
+  priceFrom           Decimal?  @db.Decimal(10, 2)
+  currency            Currency
+  lastSeenAt          DateTime
+  // Last time this URL's own detail page was actually fetched and re-ingested (not just seen in a
+  // listing). Distinct from lastSeenAt, which a scraper may bump on listing-presence alone without a
+  // detail fetch — the two would fight each other under one shared timestamp: a "just bump lastSeenAt,
+  // skip the fetch" pass run every cycle would make lastSeenAt look permanently fresh and a re-fetch
+  // would never become due. Null on legacy rows (never tracked); treated as "always eligible to fetch".
+  lastDetailFetchedAt DateTime?
+  event               Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  source              Source    @relation(fields: [sourceId], references: [id])
 
   @@index([eventId])
   @@index([sourceId])

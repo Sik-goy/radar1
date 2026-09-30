@@ -125,7 +125,8 @@ describe('ingestOne: re-scrape of a known EventSource url', () => {
   it('a single-source event fully trusts the new scrape and reports "updated"', async () => {
     const tx = fakeTx({ otherSources: 0 });
     const n = normalizeRaw(incomingRaw());
-    const outcome = await ingestOne(tx, n, 's1', new Date());
+    const now = new Date();
+    const outcome = await ingestOne(tx, n, 's1', now);
     expect(outcome).toBe('updated');
     const data = tx.event.update.mock.calls[0][0].data;
     expect(data.title).toBe('Jazz Night Reloaded');
@@ -134,6 +135,20 @@ describe('ingestOne: re-scrape of a known EventSource url', () => {
     expect(data.endsAt).toEqual(n.endsAt);
     expect(data.fingerprint).toBe(n.fingerprint);
     expect(tx.event.delete).not.toHaveBeenCalled();
+  });
+
+  it('stamps lastDetailFetchedAt on the EventSource whenever a re-scrape actually fetches the page', async () => {
+    // Distinct from lastSeenAt: this is the clock a scraper's own skip-logic gates re-fetches on
+    // (see lib/scrapers/predpredaj.ts's PREDPREDAJ_REFETCH_INTERVAL_MS). It must only ever be set by a
+    // real detail-page fetch reaching ingest — never by a mere "still listed" touch.
+    const tx = fakeTx({ otherSources: 0 });
+    const now = new Date();
+    const n = normalizeRaw(incomingRaw());
+    await ingestOne(tx, n, 's1', now);
+    expect(tx.eventSource.update).toHaveBeenCalledWith({
+      where: { id: 'src1' },
+      data: { priceFrom: n.price, currency: n.priceCurrency, lastSeenAt: now, lastDetailFetchedAt: now },
+    });
   });
 
   it('merges into the colliding event when the rewritten fingerprint matches one', async () => {

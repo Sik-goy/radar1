@@ -67,7 +67,7 @@ export async function ingestOne(tx: Tx, n: NormalizedEvent, sourceId: string, no
   if (known) {
     await tx.eventSource.update({
       where: { id: known.id },
-      data: { priceFrom: n.price, currency: n.priceCurrency, lastSeenAt: now },
+      data: { priceFrom: n.price, currency: n.priceCurrency, lastSeenAt: now, lastDetailFetchedAt: now },
     });
 
     // A single-source event has nothing else vouching for its data, so the fresh scrape fully
@@ -100,7 +100,15 @@ export async function ingestOne(tx: Tx, n: NormalizedEvent, sourceId: string, no
   const target = (await tx.event.findUnique({ where: { fingerprint: n.fingerprint } })) ?? (await findFuzzy(tx, n));
   if (target) {
     await tx.eventSource.create({
-      data: { eventId: target.id, sourceId, url: n.url, priceFrom: n.price, currency: n.priceCurrency, lastSeenAt: now },
+      data: {
+        eventId: target.id,
+        sourceId,
+        url: n.url,
+        priceFrom: n.price,
+        currency: n.priceCurrency,
+        lastSeenAt: now,
+        lastDetailFetchedAt: now,
+      },
     });
     await fillAndRefresh(tx, target, n);
     return 'merged';
@@ -123,7 +131,7 @@ export async function ingestOne(tx: Tx, n: NormalizedEvent, sourceId: string, no
       priceFrom,
       ...deriveSortFields({ startsAt: n.startsAt, priceFrom }),
       sources: {
-        create: { sourceId, url: n.url, priceFrom: n.price, currency: n.priceCurrency, lastSeenAt: now },
+        create: { sourceId, url: n.url, priceFrom: n.price, currency: n.priceCurrency, lastSeenAt: now, lastDetailFetchedAt: now },
       },
     },
   });
