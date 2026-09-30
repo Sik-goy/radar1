@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PREDPREDAJ_REFETCH_INTERVAL_MS, scrapePredpredaj } from '@/lib/scrapers/predpredaj';
+import { PREDPREDAJ_REFETCH_INTERVAL_MS, refetchJitterMs, scrapePredpredaj } from '@/lib/scrapers/predpredaj';
 import { PREDPREDAJ_BASE_URL } from '@/lib/scrapers/predpredaj/parse';
 
 const ROBOTS_URL = `${PREDPREDAJ_BASE_URL}/robots.txt`;
@@ -228,12 +228,31 @@ describe('scrapePredpredaj', () => {
         [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Known', slug: 'known' }]),
         [knownUrl]: singleDetailHtml('Known', '2026-12-01 20:00', 'Nitra'),
       });
-      const knownUrls = new Map([[canonicalKnownUrl, new Date(now.getTime() - PREDPREDAJ_REFETCH_INTERVAL_MS)]]); // exactly due
+      const dueAt = PREDPREDAJ_REFETCH_INTERVAL_MS + refetchJitterMs(canonicalKnownUrl); // base + this URL's own jitter
+      const knownUrls = new Map([[canonicalKnownUrl, new Date(now.getTime() - dueAt)]]); // exactly due
 
       const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
 
       expect(raws).toHaveLength(1);
       expect(touchedUrls).toEqual([]);
+    });
+
+    it('does not refetch a URL that only just passed the base interval but hasn\'t reached its own jittered due date yet', async () => {
+      // Real risk this guards against: without jitter, every URL scraped together becomes due on the
+      // same later run, turning the "cheap every run" savings back into one expensive spike every 3
+      // days. A URL whose jitter is 0 has no gap to test here, so skip that (rare) case.
+      const jitter = refetchJitterMs(canonicalKnownUrl);
+      if (jitter === 0) return;
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Known', slug: 'known' }]),
+      });
+      const knownUrls = new Map([[canonicalKnownUrl, new Date(now.getTime() - PREDPREDAJ_REFETCH_INTERVAL_MS)]]); // base interval only, jitter not yet elapsed
+
+      const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
+
+      expect(raws).toEqual([]);
+      expect(touchedUrls).toEqual([canonicalKnownUrl]);
     });
 
     it('always fetches a URL that has never been seen before, even with a knownUrls map present', async () => {
@@ -301,6 +320,32 @@ describe('scrapePredpredaj', () => {
       expect(touchedUrls).toEqual([canonicalTourUrl]);
       expect(fetchedUrls).toEqual([]);
       expect(fetchImpl).not.toHaveBeenCalledWith(tourUrl, expect.anything());
+    });
+
+    it('counts listing pages fetched, new URLs, and due refetches separately from fresh skips', async () => {
+      const dueUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/due/`;
+      const canonicalDueUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/due`;
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([
+          { title: 'Known', slug: 'known' }, // fresh: skipped
+          { title: 'Due', slug: 'due' }, // known but past its jittered interval: refetched
+          { title: 'New', slug: 'new' }, // never seen: refetched
+        ]),
+        [dueUrl]: singleDetailHtml('Due', '2026-12-01 20:00', 'Nitra'),
+        [`${PREDPREDAJ_BASE_URL}/sk/listky/new/`]: singleDetailHtml('New', '2026-12-01 20:00', 'Nitra'),
+      });
+      const knownUrls = new Map([
+        [canonicalKnownUrl, new Date(now.getTime() - 60 * 60_000)], // fresh
+        [canonicalDueUrl, new Date(now.getTime() - PREDPREDAJ_REFETCH_INTERVAL_MS - refetchJitterMs(canonicalDueUrl))], // due
+      ]);
+
+      const result = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
+
+      expect(result.listingPagesFetched).toBe(1);
+      expect(result.newUrls).toBe(1);
+      expect(result.duePages).toBe(1);
+      expect(result.touchedUrls).toEqual([canonicalKnownUrl]);
     });
 
     it('a skipped (touched) card does not count against maxEventsPerCategory', async () => {

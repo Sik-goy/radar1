@@ -24,6 +24,27 @@ const DEFAULT_DELAY_MS = 1500;
  */
 export const PREDPREDAJ_REFETCH_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
 
+/**
+ * Window a URL's jitter is drawn from. Without jitter, every URL scraped in the same run becomes due
+ * on the same later run (whichever one first crosses 3 days), so the "every run is cheap" savings
+ * this whole skip-logic exists for would collapse right back into one expensive spike every 3 days.
+ */
+export const PREDPREDAJ_JITTER_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Deterministic per-URL offset in [0, PREDPREDAJ_JITTER_WINDOW_MS) added to the base refetch interval,
+ * so different URLs' due dates spread across a day instead of all landing on the same run. Deterministic
+ * (same URL always gets the same offset) so a URL's due date doesn't drift run to run — only a hash of
+ * its own canonical form decides it.
+ */
+export function refetchJitterMs(canonicalUrl: string): number {
+  let hash = 5381;
+  for (let i = 0; i < canonicalUrl.length; i++) {
+    hash = (hash * 33 + canonicalUrl.charCodeAt(i)) >>> 0;
+  }
+  return hash % PREDPREDAJ_JITTER_WINDOW_MS;
+}
+
 export interface ScrapePredpredajOptions {
   categories?: PredpredajCategory[];
   maxEventsPerCategory?: number;
@@ -44,6 +65,12 @@ export interface ScrapePredpredajResult {
    * knownUrls — not EventSource.url, which a tour card's own href never becomes (only its stops' do).
    */
   fetchedUrls: string[];
+  /** Category listing pages fetched — always every requested category; listings are never skipped. */
+  listingPagesFetched: number;
+  /** Cards never seen before (absent from knownUrls entirely). */
+  newUrls: number;
+  /** Cards previously seen whose jittered PREDPREDAJ_REFETCH_INTERVAL_MS has elapsed. */
+  duePages: number;
 }
 
 function wait(ms: number): Promise<void> {
@@ -99,16 +126,24 @@ function toRawEvent(
   };
 }
 
+type RefetchDecision = 'new' | 'due' | 'fresh';
+
 /**
- * `knownUrls` is built from EventSource.url, which ingest.ts stores canonicalized (lib/normalize/url's
+ * `knownUrls` is built from a canonical URL, which ingest.ts stores canonicalized (lib/normalize/url's
  * canonicalizeUrl strips predpredaj's trailing slash, among other things) — so the lookup key must go
  * through the same canonicalization, or every URL looks "never fetched" (a real bug this was: 100% of
  * URLs got re-fetched on a run right after they'd all just been fetched).
+ *
+ * 'new' (never in the map at all) and 'due' (known, past its own jittered interval) both mean "fetch
+ * it" but are counted separately for reporting; 'fresh' means skip.
  */
-function needsRefetch(href: string, knownUrls: Map<string, Date | null> | undefined, now: Date): boolean {
-  const lastFetched = knownUrls?.get(canonicalizeUrl(href));
-  if (!lastFetched) return true; // never in the map, or explicitly null (legacy row): always due
-  return now.getTime() - lastFetched.getTime() >= PREDPREDAJ_REFETCH_INTERVAL_MS;
+function classifyRefetch(href: string, knownUrls: Map<string, Date | null> | undefined, now: Date): RefetchDecision {
+  const canonical = canonicalizeUrl(href);
+  if (!knownUrls?.has(canonical)) return 'new';
+  const lastFetched = knownUrls.get(canonical);
+  if (!lastFetched) return 'due'; // explicitly null (legacy row, never tracked): always due
+  const interval = PREDPREDAJ_REFETCH_INTERVAL_MS + refetchJitterMs(canonical);
+  return now.getTime() - lastFetched.getTime() >= interval ? 'due' : 'fresh';
 }
 
 /** Scrapes predpredaj.zoznam.sk: one or more categories, sequentially, with a delay before every request. */
@@ -122,27 +157,37 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
   const raws: RawEvent[] = [];
   const touchedUrls: string[] = [];
   const fetchedUrls: string[] = [];
+  let listingPagesFetched = 0;
+  let newUrls = 0;
+  let duePages = 0;
 
   for (const category of categories) {
     await wait(delayMs);
     const listingHtml = await fetchText(`${PREDPREDAJ_BASE_URL}/sk/kategoria/${category}/`, fetchImpl);
+    listingPagesFetched += 1;
     const allowed = parseCategoryListing(listingHtml).filter((card) => !isDisallowed(card.href, disallowed));
 
-    const toFetch: ListingCard[] = [];
+    const toFetch: { card: ListingCard; decision: RefetchDecision }[] = [];
     for (const card of allowed) {
-      if (needsRefetch(card.href, options.knownUrls, now)) toFetch.push(card);
-      // Recorded canonicalized too, so runScrape's later `WHERE url IN (touchedUrls)` actually matches
-      // the real stored rows.
-      else touchedUrls.push(canonicalizeUrl(card.href));
+      const decision = classifyRefetch(card.href, options.knownUrls, now);
+      if (decision === 'fresh') {
+        // Recorded canonicalized too, so runScrape's later `WHERE url IN (touchedUrls)` actually
+        // matches the real stored rows.
+        touchedUrls.push(canonicalizeUrl(card.href));
+      } else {
+        toFetch.push({ card, decision });
+      }
     }
     // undefined means "no cap" — a full run has no serverless timeout to bound itself against;
     // the cap exists only for smoke tests and manual partial runs (CLI's --max-pages). It bounds real
     // fetches only — a skipped (touched) card never made a request, so it never counts against it.
     const cards = options.maxEventsPerCategory === undefined ? toFetch : toFetch.slice(0, options.maxEventsPerCategory);
 
-    for (const card of cards) {
+    for (const { card, decision } of cards) {
       await wait(delayMs);
       fetchedUrls.push(canonicalizeUrl(card.href));
+      if (decision === 'new') newUrls += 1;
+      else duePages += 1;
       let detailHtml: string;
       try {
         detailHtml = await fetchText(card.href, fetchImpl);
@@ -170,5 +215,5 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
     }
   }
 
-  return { raws, touchedUrls, fetchedUrls };
+  return { raws, touchedUrls, fetchedUrls, listingPagesFetched, newUrls, duePages };
 }

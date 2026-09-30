@@ -33,7 +33,14 @@ vi.mock('@/lib/db', () => ({
 import { runScrape } from '@/lib/scrapers/run-scrape';
 
 beforeEach(() => {
-  scrapePredpredaj.mockReset().mockResolvedValue({ raws: [{ source: 'predpredaj' }], touchedUrls: [], fetchedUrls: [] });
+  scrapePredpredaj.mockReset().mockResolvedValue({
+    raws: [{ source: 'predpredaj' }],
+    touchedUrls: [],
+    fetchedUrls: [],
+    listingPagesFetched: 0,
+    newUrls: 0,
+    duePages: 0,
+  });
   upsertRawEvents.mockReset().mockResolvedValue({ created: 1, updated: 0, merged: 0, skipped: [] });
   sourceUpsert.mockReset().mockResolvedValue({ id: 'source-id' });
   sourceUpdate.mockReset().mockResolvedValue({});
@@ -110,7 +117,34 @@ describe('runScrape', () => {
     );
     expect(upsertRawEvents).toHaveBeenCalledWith([{ source: 'predpredaj' }], expect.any(Date));
     expect(sourceUpdate).toHaveBeenCalledWith({ where: { slug: 'predpredaj' }, data: { lastScrapedAt: expect.any(Date) } });
-    expect(stats).toEqual({ created: 1, updated: 0, merged: 0, skipped: [] });
+    expect(stats).toEqual({
+      created: 1,
+      updated: 0,
+      merged: 0,
+      skipped: [],
+      listingPagesFetched: 0,
+      newUrls: 0,
+      duePages: 0,
+      freshSkips: 0,
+    });
+  });
+
+  it('reports scrape-level counts (listing pages, new URLs, due refetches, fresh skips) alongside the ingest stats', async () => {
+    scrapePredpredaj.mockResolvedValue({
+      raws: [],
+      touchedUrls: ['https://predpredaj.zoznam.sk/sk/listky/a/'],
+      fetchedUrls: [],
+      listingPagesFetched: 7,
+      newUrls: 3,
+      duePages: 2,
+    });
+
+    const stats = await runScrape({ source: 'predpredaj' });
+
+    expect(stats.listingPagesFetched).toBe(7);
+    expect(stats.newUrls).toBe(3);
+    expect(stats.duePages).toBe(2);
+    expect(stats.freshSkips).toBe(1); // derived from touchedUrls.length
   });
 
   it('bumps lastSeenAt for every touched (skipped, no detail fetch) URL', async () => {

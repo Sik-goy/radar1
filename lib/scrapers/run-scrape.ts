@@ -16,6 +16,13 @@ export interface RunScrapeOptions {
   maxEventsPerCategory?: number;
 }
 
+export interface RunScrapeStats extends IngestStats {
+  listingPagesFetched: number;
+  newUrls: number;
+  duePages: number;
+  freshSkips: number;
+}
+
 /**
  * Scrapes one source end to end: ensures its Source row exists, loads which pages are already known
  * (and when each was last actually fetched, so the scraper can skip re-fetching ones still fresh),
@@ -27,7 +34,7 @@ export interface RunScrapeOptions {
  * under their own rows — so EventSource alone has no entry a tour card could ever match, and every
  * tour card looked "never fetched" on every run, forever (a real bug, caught live).
  */
-export async function runScrape(options: RunScrapeOptions): Promise<IngestStats> {
+export async function runScrape(options: RunScrapeOptions): Promise<RunScrapeStats> {
   const source = await prisma.source.upsert({
     where: { slug: options.source },
     update: {},
@@ -38,7 +45,7 @@ export async function runScrape(options: RunScrapeOptions): Promise<IngestStats>
   const knownRows = await prisma.scrapedPage.findMany({ select: { url: true, lastFetchedAt: true } });
   const knownUrls = new Map<string, Date | null>(knownRows.map((row) => [row.url, row.lastFetchedAt]));
 
-  const { raws, touchedUrls, fetchedUrls } = await scrapePredpredaj({
+  const { raws, touchedUrls, fetchedUrls, listingPagesFetched, newUrls, duePages } = await scrapePredpredaj({
     categories: options.categories,
     maxEventsPerCategory: options.maxEventsPerCategory,
     knownUrls,
@@ -62,5 +69,11 @@ export async function runScrape(options: RunScrapeOptions): Promise<IngestStats>
   }
 
   await prisma.source.update({ where: { slug: options.source }, data: { lastScrapedAt: now } });
-  return stats;
+  return {
+    ...stats,
+    listingPagesFetched: listingPagesFetched ?? 0,
+    newUrls: newUrls ?? 0,
+    duePages: duePages ?? 0,
+    freshSkips: touchedUrls.length,
+  };
 }

@@ -47,6 +47,10 @@ async function main() {
   });
   const duration = formatDuration(Date.now() - startedAt);
 
+  console.log(
+    `Pages: ${stats.listingPagesFetched} listing(s) fetched, ${stats.newUrls} new, ` +
+      `${stats.duePages} due refetch(es), ${stats.freshSkips} fresh (skipped)`,
+  );
   console.log('Ingest stats:', stats);
   if (stats.skipped.length > 0) {
     console.log(`${stats.skipped.length} item(s) skipped:`);
