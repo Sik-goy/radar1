@@ -1,3 +1,4 @@
+import { canonicalizeUrl } from '@/lib/normalize/url';
 import {
   PREDPREDAJ_BASE_URL,
   PREDPREDAJ_CATEGORIES,
@@ -92,8 +93,14 @@ function toRawEvent(
   };
 }
 
+/**
+ * `knownUrls` is built from EventSource.url, which ingest.ts stores canonicalized (lib/normalize/url's
+ * canonicalizeUrl strips predpredaj's trailing slash, among other things) — so the lookup key must go
+ * through the same canonicalization, or every URL looks "never fetched" (a real bug this was: 100% of
+ * URLs got re-fetched on a run right after they'd all just been fetched).
+ */
 function needsRefetch(href: string, knownUrls: Map<string, Date | null> | undefined, now: Date): boolean {
-  const lastFetched = knownUrls?.get(href);
+  const lastFetched = knownUrls?.get(canonicalizeUrl(href));
   if (!lastFetched) return true; // never in the map, or explicitly null (legacy row): always due
   return now.getTime() - lastFetched.getTime() >= PREDPREDAJ_REFETCH_INTERVAL_MS;
 }
@@ -117,7 +124,9 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
     const toFetch: ListingCard[] = [];
     for (const card of allowed) {
       if (needsRefetch(card.href, options.knownUrls, now)) toFetch.push(card);
-      else touchedUrls.push(card.href);
+      // Recorded canonicalized too, so runScrape's later `WHERE url IN (touchedUrls)` actually matches
+      // the real stored rows.
+      else touchedUrls.push(canonicalizeUrl(card.href));
     }
     // undefined means "no cap" — a full run has no serverless timeout to bound itself against;
     // the cap exists only for smoke tests and manual partial runs (CLI's --max-pages). It bounds real

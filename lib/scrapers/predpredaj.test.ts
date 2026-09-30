@@ -200,19 +200,25 @@ describe('scrapePredpredaj', () => {
 
   describe('re-fetch skipping', () => {
     const now = new Date('2026-11-01T12:00:00Z');
+    // parseCategoryListing always produces a trailing-slash href (predpredaj's own URL convention),
+    // but EventSource.url is stored canonicalized (lib/normalize/url's canonicalizeUrl strips it) —
+    // so a real `knownUrls` map, built from actual DB rows, is always keyed without the slash. Real
+    // bug, caught live: a naive `knownUrls.get(card.href)` never matched, so every single URL looked
+    // "never fetched" — 524/524 got re-fetched on a run right after they'd all just been fetched.
     const knownUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/known/`;
+    const canonicalKnownUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/known`;
 
-    it('skips the detail fetch for a URL fetched within the last day, and reports it as touched', async () => {
+    it('skips the detail fetch for a URL fetched within the last day, and reports it as touched (canonicalized, matching the real DB)', async () => {
       const fetchImpl = fetchImplFrom({
         [ROBOTS_URL]: ROBOTS_TXT,
         [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Known', slug: 'known' }]),
       });
-      const knownUrls = new Map([[knownUrl, new Date(now.getTime() - 60 * 60_000)]]); // fetched 1h ago
+      const knownUrls = new Map([[canonicalKnownUrl, new Date(now.getTime() - 60 * 60_000)]]); // fetched 1h ago
 
       const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
 
       expect(raws).toEqual([]);
-      expect(touchedUrls).toEqual([knownUrl]);
+      expect(touchedUrls).toEqual([canonicalKnownUrl]);
       expect(fetchImpl).not.toHaveBeenCalledWith(knownUrl, expect.anything());
     });
 
@@ -222,7 +228,7 @@ describe('scrapePredpredaj', () => {
         [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Known', slug: 'known' }]),
         [knownUrl]: singleDetailHtml('Known', '2026-12-01 20:00', 'Nitra'),
       });
-      const knownUrls = new Map([[knownUrl, new Date(now.getTime() - PREDPREDAJ_REFETCH_INTERVAL_MS)]]); // exactly due
+      const knownUrls = new Map([[canonicalKnownUrl, new Date(now.getTime() - PREDPREDAJ_REFETCH_INTERVAL_MS)]]); // exactly due
 
       const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
 
@@ -268,7 +274,7 @@ describe('scrapePredpredaj', () => {
         ]),
         [freshUrl]: singleDetailHtml('Fresh', '2026-12-01 20:00', 'Nitra'),
       });
-      const knownUrls = new Map([[knownUrl, new Date(now.getTime() - 60 * 60_000)]]);
+      const knownUrls = new Map([[canonicalKnownUrl, new Date(now.getTime() - 60 * 60_000)]]);
 
       const { raws, touchedUrls } = await scrapePredpredaj({
         categories: ['koncert'],
@@ -281,7 +287,7 @@ describe('scrapePredpredaj', () => {
 
       expect(raws).toHaveLength(1);
       expect(raws[0].title).toBe('Fresh');
-      expect(touchedUrls).toEqual([knownUrl]);
+      expect(touchedUrls).toEqual([canonicalKnownUrl]);
     });
   });
 });
