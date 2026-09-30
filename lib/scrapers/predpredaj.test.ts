@@ -264,6 +264,45 @@ describe('scrapePredpredaj', () => {
       expect(touchedUrls).toEqual([]);
     });
 
+    it('reports every actually-fetched card href in fetchedUrls, canonicalized', async () => {
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'New', slug: 'new' }]),
+        [`${PREDPREDAJ_BASE_URL}/sk/listky/new/`]: singleDetailHtml('New', '2026-12-01 20:00', 'Nitra'),
+      });
+
+      const { fetchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, now });
+
+      expect(fetchedUrls).toEqual([`${PREDPREDAJ_BASE_URL}/sk/listky/new`]);
+    });
+
+    it('a tour card is skipped by the same freshness check as a single-date card, keyed by its own href (not any stop\'s href)', async () => {
+      // Real bug, caught live: a tour's card.href never becomes an EventSource.url — only each stop's
+      // href does, under its own row — so a knownUrls map built from EventSource had no entry a tour
+      // card could ever match, and every tour card looked "never fetched" on every single run, forever.
+      // fetchedUrls (not EventSource) is the freshness source of truth precisely so a tour card has one.
+      const tourUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/tour/`;
+      const canonicalTourUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/tour`;
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Tour', slug: 'tour' }]),
+      });
+      const knownUrls = new Map([[canonicalTourUrl, new Date(now.getTime() - 60 * 60_000)]]); // fetched 1h ago
+
+      const { raws, touchedUrls, fetchedUrls } = await scrapePredpredaj({
+        categories: ['koncert'],
+        delayMs: 0,
+        fetchImpl,
+        knownUrls,
+        now,
+      });
+
+      expect(raws).toEqual([]);
+      expect(touchedUrls).toEqual([canonicalTourUrl]);
+      expect(fetchedUrls).toEqual([]);
+      expect(fetchImpl).not.toHaveBeenCalledWith(tourUrl, expect.anything());
+    });
+
     it('a skipped (touched) card does not count against maxEventsPerCategory', async () => {
       const freshUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/fresh/`;
       const fetchImpl = fetchImplFrom({

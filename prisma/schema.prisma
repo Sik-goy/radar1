@@ -85,6 +85,16 @@ model EventSource {
   @@index([sourceId])
 }
 
+// Tracks when a *scraped page* (a listing card's own href) was last actually fetched, independent of
+// EventSource. A single-date event's card.href becomes its EventSource.url one-to-one, but a tour
+// card's href never does — only each of its stops' hrefs do, under their own EventSource rows. Without
+// this table, the skip-logic gate had no persisted state to check a tour card against, so every tour
+// card looked "never fetched" on every run, forever, no matter how recently its stops were re-ingested.
+model ScrapedPage {
+  url           String   @id
+  lastFetchedAt DateTime
+}
+
 model Favorite {
   userId    String
   eventId   String

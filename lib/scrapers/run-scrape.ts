@@ -17,10 +17,15 @@ export interface RunScrapeOptions {
 }
 
 /**
- * Scrapes one source end to end: ensures its Source row exists, loads which of its URLs are already
- * known (and when their detail page was last actually fetched, so the scraper can skip re-fetching
- * ones still fresh), scrapes, ingests, bumps lastSeenAt for the URLs the scraper only saw in a listing,
- * and stamps lastScrapedAt.
+ * Scrapes one source end to end: ensures its Source row exists, loads which pages are already known
+ * (and when each was last actually fetched, so the scraper can skip re-fetching ones still fresh),
+ * scrapes, ingests, bumps lastSeenAt for the URLs the scraper only saw in a listing, records every
+ * page actually fetched this run, and stamps lastScrapedAt.
+ *
+ * Freshness is tracked in ScrapedPage, not EventSource: a single-date event's card.href becomes its
+ * EventSource.url one-to-one, but a tour card's href never does — only each of its stops' hrefs do,
+ * under their own rows — so EventSource alone has no entry a tour card could ever match, and every
+ * tour card looked "never fetched" on every run, forever (a real bug, caught live).
  */
 export async function runScrape(options: RunScrapeOptions): Promise<IngestStats> {
   const source = await prisma.source.upsert({
@@ -30,13 +35,10 @@ export async function runScrape(options: RunScrapeOptions): Promise<IngestStats>
   });
 
   const now = new Date();
-  const knownRows = await prisma.eventSource.findMany({
-    where: { sourceId: source.id },
-    select: { url: true, lastDetailFetchedAt: true },
-  });
-  const knownUrls = new Map(knownRows.map((row) => [row.url, row.lastDetailFetchedAt]));
+  const knownRows = await prisma.scrapedPage.findMany({ select: { url: true, lastFetchedAt: true } });
+  const knownUrls = new Map<string, Date | null>(knownRows.map((row) => [row.url, row.lastFetchedAt]));
 
-  const { raws, touchedUrls } = await scrapePredpredaj({
+  const { raws, touchedUrls, fetchedUrls } = await scrapePredpredaj({
     categories: options.categories,
     maxEventsPerCategory: options.maxEventsPerCategory,
     knownUrls,
@@ -47,6 +49,16 @@ export async function runScrape(options: RunScrapeOptions): Promise<IngestStats>
 
   if (touchedUrls.length > 0) {
     await prisma.eventSource.updateMany({ where: { url: { in: touchedUrls } }, data: { lastSeenAt: now } });
+  }
+
+  if (fetchedUrls.length > 0) {
+    // createMany (skipDuplicates) seeds rows for URLs never tracked before; updateMany then bumps
+    // every fetched URL — new or already-tracked — to `now` in one pass.
+    await prisma.scrapedPage.createMany({
+      data: fetchedUrls.map((url) => ({ url, lastFetchedAt: now })),
+      skipDuplicates: true,
+    });
+    await prisma.scrapedPage.updateMany({ where: { url: { in: fetchedUrls } }, data: { lastFetchedAt: now } });
   }
 
   await prisma.source.update({ where: { slug: options.source }, data: { lastScrapedAt: now } });

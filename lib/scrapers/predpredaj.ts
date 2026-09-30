@@ -38,6 +38,12 @@ export interface ScrapePredpredajResult {
   raws: RawEvent[];
   /** Listed but not re-fetched this run (still within PREDPREDAJ_REFETCH_INTERVAL_MS) — the caller should bump their lastSeenAt directly, since no RawEvent exists for them. */
   touchedUrls: string[];
+  /**
+   * Every card href actually fetched this run (canonicalized), regardless of whether it parsed into
+   * a RawEvent. This is the freshness source of truth the caller persists for the *next* run's
+   * knownUrls — not EventSource.url, which a tour card's own href never becomes (only its stops' do).
+   */
+  fetchedUrls: string[];
 }
 
 function wait(ms: number): Promise<void> {
@@ -115,6 +121,7 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
   const disallowed = await loadDisallowedPatterns(fetchImpl);
   const raws: RawEvent[] = [];
   const touchedUrls: string[] = [];
+  const fetchedUrls: string[] = [];
 
   for (const category of categories) {
     await wait(delayMs);
@@ -135,6 +142,7 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
 
     for (const card of cards) {
       await wait(delayMs);
+      fetchedUrls.push(canonicalizeUrl(card.href));
       let detailHtml: string;
       try {
         detailHtml = await fetchText(card.href, fetchImpl);
@@ -162,5 +170,5 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
     }
   }
 
-  return { raws, touchedUrls };
+  return { raws, touchedUrls, fetchedUrls };
 }
