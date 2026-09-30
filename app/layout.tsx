@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { Footer } from '@/components/Footer';
 import { Header } from '@/components/Header';
 import { getLang } from '@/lib/i18n/server';
 
@@ -15,6 +16,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body className="bg-zinc-50 text-zinc-900 antialiased">
         <Header lang={lang} />
         <main>{children}</main>
+        <Footer />
       </body>
     </html>
   );
