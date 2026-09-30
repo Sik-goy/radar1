@@ -21,8 +21,11 @@ Aggregated event feed for Slovakia and Czech Republic.
 ## Scraping
 
 `npm run scrape -- --source predpredaj [--category <koncert|sport|show|divadlo|festival|pre-deti|ostatne>] [--max-pages N]`
-scrapes predpredaj.zoznam.sk and ingests the result. `.github/workflows/scrape.yml` runs this
-on a schedule (every 6 hours) and via a manual "Run workflow" button; `DATABASE_URL` and
+scrapes predpredaj.zoznam.sk and ingests the result. A known URL whose detail page was fetched within
+the last `PREDPREDAJ_REFETCH_INTERVAL_MS` (3 days) is skipped — only its `EventSource.lastSeenAt` is
+bumped from the listing — so a run only pays for a full detail fetch on new events or ones actually due
+for a refresh; a plain "still listed" touch never counts as a fetch. `.github/workflows/scrape.yml` runs
+this twice daily (`17 5,17 * * *`) and via a manual "Run workflow" button; `DATABASE_URL` and
 `DIRECT_URL` are set as GitHub Actions secrets, not committed.
 
 `GET /api/cron/scrape` (optionally `?category=...&maxEvents=...`), with

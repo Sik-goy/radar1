@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { scrapePredpredaj } from '@/lib/scrapers/predpredaj';
+import { PREDPREDAJ_REFETCH_INTERVAL_MS, scrapePredpredaj } from '@/lib/scrapers/predpredaj';
 import { PREDPREDAJ_BASE_URL } from '@/lib/scrapers/predpredaj/parse';
 
 const ROBOTS_URL = `${PREDPREDAJ_BASE_URL}/robots.txt`;
@@ -49,7 +49,7 @@ describe('scrapePredpredaj', () => {
       [`${PREDPREDAJ_BASE_URL}/sk/listky/event-a/`]: singleDetailHtml('Event A', '2026-12-01 20:00', 'Bardejov'),
     });
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
 
     expect(raws).toEqual([
       {
@@ -75,7 +75,7 @@ describe('scrapePredpredaj', () => {
       [`${PREDPREDAJ_BASE_URL}/sk/listky/tour/`]: tourDetailHtml,
     });
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
 
     expect(raws).toHaveLength(2);
     expect(raws.map((r) => r.sourceUrl)).toEqual([
@@ -95,7 +95,7 @@ describe('scrapePredpredaj', () => {
       [`${PREDPREDAJ_BASE_URL}/sk/listky/allowed/`]: singleDetailHtml('Allowed', '2026-12-01 20:00', 'Košice'),
     });
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
 
     expect(raws).toHaveLength(1);
     expect(raws[0].title).toBe('Allowed');
@@ -124,7 +124,7 @@ describe('scrapePredpredaj', () => {
       throw new Error(`unexpected fetch: ${url}`);
     }) as unknown as typeof fetch;
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
 
     expect(raws).toHaveLength(1);
     expect(raws[0].title).toBe('Fine');
@@ -139,7 +139,7 @@ describe('scrapePredpredaj', () => {
       [`${PREDPREDAJ_BASE_URL}/sk/listky/recovered/`]: `<script type="application/ld+json">[{"name":"Recovered","startDate":"2026-12-01 20:00","location":{"name":"Klub, Ulica, Mesto","address":"Mesto"},"image":"https://img/x.jpg","description":"a "quoted" phrase"}]</script>`,
     });
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
 
     expect(raws).toHaveLength(1);
     expect(raws[0].title).toBe('Recovered');
@@ -156,7 +156,7 @@ describe('scrapePredpredaj', () => {
       [`${PREDPREDAJ_BASE_URL}/sk/listky/fine/`]: singleDetailHtml('Fine', '2026-12-01 20:00', 'Nitra'),
     });
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
 
     expect(raws).toHaveLength(1);
     expect(raws[0].title).toBe('Fine');
@@ -174,7 +174,7 @@ describe('scrapePredpredaj', () => {
       [`${PREDPREDAJ_BASE_URL}/sk/listky/b/`]: singleDetailHtml('B', '2026-12-01 20:00', 'Nitra'),
     });
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], maxEventsPerCategory: 2, delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], maxEventsPerCategory: 2, delayMs: 0, fetchImpl });
 
     expect(raws).toHaveLength(2);
     expect(fetchImpl).not.toHaveBeenCalledWith(`${PREDPREDAJ_BASE_URL}/sk/listky/c/`, expect.anything());
@@ -193,8 +193,95 @@ describe('scrapePredpredaj', () => {
       [`${PREDPREDAJ_BASE_URL}/sk/listky/c/`]: singleDetailHtml('C', '2026-12-01 20:00', 'Nitra'),
     });
 
-    const raws = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
+    const { raws } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl });
 
     expect(raws).toHaveLength(3);
+  });
+
+  describe('re-fetch skipping', () => {
+    const now = new Date('2026-11-01T12:00:00Z');
+    const knownUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/known/`;
+
+    it('skips the detail fetch for a URL fetched within the last day, and reports it as touched', async () => {
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Known', slug: 'known' }]),
+      });
+      const knownUrls = new Map([[knownUrl, new Date(now.getTime() - 60 * 60_000)]]); // fetched 1h ago
+
+      const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
+
+      expect(raws).toEqual([]);
+      expect(touchedUrls).toEqual([knownUrl]);
+      expect(fetchImpl).not.toHaveBeenCalledWith(knownUrl, expect.anything());
+    });
+
+    it('fetches a known URL again once PREDPREDAJ_REFETCH_INTERVAL_MS has passed', async () => {
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Known', slug: 'known' }]),
+        [knownUrl]: singleDetailHtml('Known', '2026-12-01 20:00', 'Nitra'),
+      });
+      const knownUrls = new Map([[knownUrl, new Date(now.getTime() - PREDPREDAJ_REFETCH_INTERVAL_MS)]]); // exactly due
+
+      const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
+
+      expect(raws).toHaveLength(1);
+      expect(touchedUrls).toEqual([]);
+    });
+
+    it('always fetches a URL that has never been seen before, even with a knownUrls map present', async () => {
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'New', slug: 'new' }]),
+        [`${PREDPREDAJ_BASE_URL}/sk/listky/new/`]: singleDetailHtml('New', '2026-12-01 20:00', 'Nitra'),
+      });
+      const knownUrls = new Map([[knownUrl, now]]); // unrelated URL, just proves the map's presence alone isn't the trigger
+
+      const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
+
+      expect(raws).toHaveLength(1);
+      expect(touchedUrls).toEqual([]);
+    });
+
+    it('a null lastDetailFetchedAt (legacy row) is treated as always due for a fetch', async () => {
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([{ title: 'Known', slug: 'known' }]),
+        [knownUrl]: singleDetailHtml('Known', '2026-12-01 20:00', 'Nitra'),
+      });
+      const knownUrls = new Map([[knownUrl, null]]);
+
+      const { raws, touchedUrls } = await scrapePredpredaj({ categories: ['koncert'], delayMs: 0, fetchImpl, knownUrls, now });
+
+      expect(raws).toHaveLength(1);
+      expect(touchedUrls).toEqual([]);
+    });
+
+    it('a skipped (touched) card does not count against maxEventsPerCategory', async () => {
+      const freshUrl = `${PREDPREDAJ_BASE_URL}/sk/listky/fresh/`;
+      const fetchImpl = fetchImplFrom({
+        [ROBOTS_URL]: ROBOTS_TXT,
+        [`${PREDPREDAJ_BASE_URL}/sk/kategoria/koncert/`]: listingHtml([
+          { title: 'Known', slug: 'known' },
+          { title: 'Fresh', slug: 'fresh' },
+        ]),
+        [freshUrl]: singleDetailHtml('Fresh', '2026-12-01 20:00', 'Nitra'),
+      });
+      const knownUrls = new Map([[knownUrl, new Date(now.getTime() - 60 * 60_000)]]);
+
+      const { raws, touchedUrls } = await scrapePredpredaj({
+        categories: ['koncert'],
+        maxEventsPerCategory: 1,
+        delayMs: 0,
+        fetchImpl,
+        knownUrls,
+        now,
+      });
+
+      expect(raws).toHaveLength(1);
+      expect(raws[0].title).toBe('Fresh');
+      expect(touchedUrls).toEqual([knownUrl]);
+    });
   });
 });

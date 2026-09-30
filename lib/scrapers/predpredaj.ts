@@ -4,6 +4,7 @@ import {
   PREDPREDAJ_CATEGORY_LABEL,
   parseCategoryListing,
   parseEventDetail,
+  type ListingCard,
   type PredpredajCategory,
 } from '@/lib/scrapers/predpredaj/parse';
 import type { RawEvent } from '@/lib/types';
@@ -11,11 +12,31 @@ import type { RawEvent } from '@/lib/types';
 const USER_AGENT = 'RadarBot/0.1 (+https://github.com/Sik-goy/radar1; contact: matejn2012@gmail.com)';
 const DEFAULT_DELAY_MS = 1500;
 
+/**
+ * How often a known URL's detail page is re-fetched. Below this, its page is assumed unchanged and
+ * only EventSource.lastSeenAt is bumped (from the listing, no detail fetch) — one threshold covers
+ * both "skip anything fetched very recently" and "never go more than a few days without a real
+ * refresh": a URL touched more often than this never crosses the gate, one touched less often always
+ * does. Must be checked against `lastDetailFetchedAt`, never `lastSeenAt` — a listing-only touch would
+ * make lastSeenAt look permanently fresh under a schedule that runs more often than this interval,
+ * and a re-fetch would never become due.
+ */
+export const PREDPREDAJ_REFETCH_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
+
 export interface ScrapePredpredajOptions {
   categories?: PredpredajCategory[];
   maxEventsPerCategory?: number;
   delayMs?: number;
   fetchImpl?: typeof fetch;
+  /** url -> last time its detail page was actually fetched. Absent or null means "never — always fetch". */
+  knownUrls?: Map<string, Date | null>;
+  now?: Date;
+}
+
+export interface ScrapePredpredajResult {
+  raws: RawEvent[];
+  /** Listed but not re-fetched this run (still within PREDPREDAJ_REFETCH_INTERVAL_MS) — the caller should bump their lastSeenAt directly, since no RawEvent exists for them. */
+  touchedUrls: string[];
 }
 
 function wait(ms: number): Promise<void> {
@@ -71,22 +92,37 @@ function toRawEvent(
   };
 }
 
+function needsRefetch(href: string, knownUrls: Map<string, Date | null> | undefined, now: Date): boolean {
+  const lastFetched = knownUrls?.get(href);
+  if (!lastFetched) return true; // never in the map, or explicitly null (legacy row): always due
+  return now.getTime() - lastFetched.getTime() >= PREDPREDAJ_REFETCH_INTERVAL_MS;
+}
+
 /** Scrapes predpredaj.zoznam.sk: one or more categories, sequentially, with a delay before every request. */
-export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): Promise<RawEvent[]> {
+export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): Promise<ScrapePredpredajResult> {
   const categories = options.categories ?? [...PREDPREDAJ_CATEGORIES];
   const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const now = options.now ?? new Date();
 
   const disallowed = await loadDisallowedPatterns(fetchImpl);
   const raws: RawEvent[] = [];
+  const touchedUrls: string[] = [];
 
   for (const category of categories) {
     await wait(delayMs);
     const listingHtml = await fetchText(`${PREDPREDAJ_BASE_URL}/sk/kategoria/${category}/`, fetchImpl);
     const allowed = parseCategoryListing(listingHtml).filter((card) => !isDisallowed(card.href, disallowed));
+
+    const toFetch: ListingCard[] = [];
+    for (const card of allowed) {
+      if (needsRefetch(card.href, options.knownUrls, now)) toFetch.push(card);
+      else touchedUrls.push(card.href);
+    }
     // undefined means "no cap" — a full run has no serverless timeout to bound itself against;
-    // the cap exists only for smoke tests and manual partial runs (CLI's --max-pages).
-    const cards = options.maxEventsPerCategory === undefined ? allowed : allowed.slice(0, options.maxEventsPerCategory);
+    // the cap exists only for smoke tests and manual partial runs (CLI's --max-pages). It bounds real
+    // fetches only — a skipped (touched) card never made a request, so it never counts against it.
+    const cards = options.maxEventsPerCategory === undefined ? toFetch : toFetch.slice(0, options.maxEventsPerCategory);
 
     for (const card of cards) {
       await wait(delayMs);
@@ -117,5 +153,5 @@ export async function scrapePredpredaj(options: ScrapePredpredajOptions = {}): P
     }
   }
 
-  return raws;
+  return { raws, touchedUrls };
 }

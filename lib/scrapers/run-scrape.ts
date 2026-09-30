@@ -16,16 +16,39 @@ export interface RunScrapeOptions {
   maxEventsPerCategory?: number;
 }
 
-/** Scrapes one source end to end: ensures its Source row exists, scrapes, ingests, stamps lastScrapedAt. */
+/**
+ * Scrapes one source end to end: ensures its Source row exists, loads which of its URLs are already
+ * known (and when their detail page was last actually fetched, so the scraper can skip re-fetching
+ * ones still fresh), scrapes, ingests, bumps lastSeenAt for the URLs the scraper only saw in a listing,
+ * and stamps lastScrapedAt.
+ */
 export async function runScrape(options: RunScrapeOptions): Promise<IngestStats> {
-  await prisma.source.upsert({
+  const source = await prisma.source.upsert({
     where: { slug: options.source },
     update: {},
     create: { slug: options.source, ...SOURCE_INFO[options.source] },
   });
 
-  const raws = await scrapePredpredaj({ categories: options.categories, maxEventsPerCategory: options.maxEventsPerCategory });
-  const stats = await upsertRawEvents(raws);
-  await prisma.source.update({ where: { slug: options.source }, data: { lastScrapedAt: new Date() } });
+  const now = new Date();
+  const knownRows = await prisma.eventSource.findMany({
+    where: { sourceId: source.id },
+    select: { url: true, lastDetailFetchedAt: true },
+  });
+  const knownUrls = new Map(knownRows.map((row) => [row.url, row.lastDetailFetchedAt]));
+
+  const { raws, touchedUrls } = await scrapePredpredaj({
+    categories: options.categories,
+    maxEventsPerCategory: options.maxEventsPerCategory,
+    knownUrls,
+    now,
+  });
+
+  const stats = await upsertRawEvents(raws, now);
+
+  if (touchedUrls.length > 0) {
+    await prisma.eventSource.updateMany({ where: { url: { in: touchedUrls } }, data: { lastSeenAt: now } });
+  }
+
+  await prisma.source.update({ where: { slug: options.source }, data: { lastScrapedAt: now } });
   return stats;
 }
